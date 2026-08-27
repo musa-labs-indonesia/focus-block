@@ -1,0 +1,2 @@
+- For visual UI work, must use the installed Playwriter/browser skill to inspect the running local app at its provided localhost URL, including desktop and mobile views, before making design changes. Confidence: 1.0
+- Prefers Playwriter/browser checks to be run directly without asking for confirmation again. Confidence: 0.98

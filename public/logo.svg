@@ -1,0 +1,11 @@
+<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Focus Block logo — aperture target">
+  <title>Focus Block — aperture</title>
+  <!-- B: block + aperture target. Monochrome, geometric, bold, negative-space.
+       Outer block (rounded square) + circular aperture (hole) + crosshair (solid) inside.
+       Inspired by minimalist P/S/F — evenodd, currentColor, works on light/dark. -->
+  <path fill="currentColor" fill-rule="evenodd" d="
+    M 14 26 Q 14 10 30 10 H 70 Q 86 10 86 26 V 70 Q 86 86 70 86 H 30 Q 14 86 14 70 V 26 Z
+    M 50 32 A 16 16 0 1 1 50 64 A 16 16 0 1 1 50 32 Z
+    M 36 46 H 48 V 34 H 52 V 46 H 64 V 50 H 52 V 62 H 48 V 50 H 36 Z
+  "/>
+</svg>
