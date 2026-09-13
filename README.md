@@ -133,7 +133,7 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 
 - **First Start/End without saved authorization:** `pkexec` dialog (system password)
 - **Saved authorization enabled:** `sudo -n /usr/local/bin/focusblock-apply /tmp/focusblock_hosts_tmp` (no prompt). Helper validates tmp (exists, not symlink, 0 < size ≤100KB) then `cp /tmp/focusblock_hosts_tmp /etc/hosts`
-- **Files:** `/usr/local/bin/focusblock-apply` `755`, `/etc/sudoers.d/focusblock` `440`; `visudo -c` must be `parsed OK`. No cron file is installed — `/etc/cron.d/focusblock` only ever appears as a leftover from 0.1.1 and is removed on enable
+- **Files:** `/usr/local/bin/focusblock-apply` `755`, `/etc/sudoers.d/focusblock` `440`, both `root:root`. One `pkexec` stages the rule, validates it with `visudo -cf`, and only then installs — a rule that does not parse never reaches `sudoers.d`, and a failed install changes nothing. No cron file is installed — `/etc/cron.d/focusblock` only ever appears as a leftover from 0.1.1 and is removed on enable
 - **Check:** `sudo -n -l` should show `(ALL) NOPASSWD: /usr/local/bin/focusblock-apply ...`; `pkexec cat /etc/sudoers.d/focusblock` to inspect
 
 ## Troubleshooting

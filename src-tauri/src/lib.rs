@@ -21,6 +21,9 @@ const SUDOERS_PATH: &str = "/etc/sudoers.d/focusblock";
 #[cfg(target_os = "linux")]
 const CRON_PATH: &str = "/etc/cron.d/focusblock";
 
+#[cfg(not(target_os = "windows"))]
+const HOSTS_TMP_PATH: &str = "/tmp/focusblock_hosts_tmp";
+
 fn tmp_hosts_path() -> String {
     #[cfg(target_os = "windows")]
     {
@@ -28,7 +31,7 @@ fn tmp_hosts_path() -> String {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        "/tmp/focusblock_hosts_tmp".to_string()
+        HOSTS_TMP_PATH.to_string()
     }
 }
 
@@ -248,26 +251,11 @@ fn write_hosts_privileged(content: &str) -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
+        // only the installed helper gets a passwordless path; a bare `sudo -n cp` relied on whatever
+        // broader sudo rights the machine happens to have, and would sidestep the helper entirely
         if is_saved_auth_active() {
             let helper_try = Command::new("sudo").args(["-n", HELPER_PATH, &tmp_path]).output();
             if let Ok(out) = helper_try {
-                if out.status.success() {
-                    let _ = fs::remove_file(&tmp_path);
-                    flush_dns();
-                    return Ok(());
-                }
-            }
-            let sudo_cp = Command::new("sudo").args(["-n", "cp", &tmp_path, HOSTS_PATH]).output();
-            if let Ok(out) = sudo_cp {
-                if out.status.success() {
-                    let _ = fs::remove_file(&tmp_path);
-                    flush_dns();
-                    return Ok(());
-                }
-            }
-        } else {
-            let sudo_try = Command::new("sudo").args(["-n", "cp", &tmp_path, HOSTS_PATH]).output();
-            if let Ok(out) = sudo_try {
                 if out.status.success() {
                     let _ = fs::remove_file(&tmp_path);
                     flush_dns();
@@ -448,6 +436,44 @@ fn check_saved_auth() -> Result<serde_json::Value, String> {
     }))
 }
 
+// The username lands in a sudoers rule, so it has to be a plain name: a stray space or newline is a
+// syntax error, and a bad one stops sudo working for the whole machine. Refuse rather than guess —
+// guessing (the old default) would write a rule for whoever that name happens to be.
+#[cfg(target_os = "linux")]
+fn current_username() -> Result<String, String> {
+    let user = std::env::var("SUDO_USER")
+        .or_else(|_| std::env::var("USER"))
+        .ok()
+        .filter(|u| !u.is_empty() && u != "root")
+        .or_else(|| {
+            Command::new("id")
+                .args(["-un"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+        })
+        .unwrap_or_default();
+    if user.is_empty() {
+        return Err("could not determine the current username — refusing to write a sudoers rule".to_string());
+    }
+    if !user
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "refusing to write a sudoers rule for unexpected username {:?}",
+            user
+        ));
+    }
+    Ok(user)
+}
+
 #[cfg(target_os = "linux")]
 #[tauri::command]
 fn enable_saved_auth() -> Result<String, String> {
@@ -466,41 +492,59 @@ if [ "$SZ" -eq 0 ]; then echo "empty"; exit 1; fi
 cp "$TMP" /etc/hosts
 resolvectl flush-caches 2>/dev/null || systemd-resolve --flush-caches 2>/dev/null || true
 "#;
-    // write helper to tmp first then pkexec to move to proper place
-    let tmp_helper = "/tmp/focusblock-helper-tmp";
-    let tmp_sudoers = "/tmp/focusblock-sudoers-tmp";
-    fs::write(tmp_helper, helper_content).map_err(|e| e.to_string())?;
-    // get current user (tauri may not have USER env)
-    let user = std::env::var("SUDO_USER")
-        .or_else(|_| std::env::var("USER"))
-        .ok()
-        .filter(|u| !u.is_empty() && u != "root")
-        .or_else(|| {
-            Command::new("id")
-                .args(["-un"])
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    } else {
-                        None
-                    }
-                })
-        })
-        .unwrap_or_else(|| "muhsalaa".to_string());
-    // sudoers: allow helper with tmp arg, tight
-    let sudoers_content = format!("{} ALL=(ALL) NOPASSWD: {} /tmp/focusblock_hosts_tmp\n", user, HELPER_PATH);
-    fs::write(tmp_sudoers, &sudoers_content).map_err(|e| e.to_string())?;
+    let user = current_username()?;
 
-    // one pkexec prompt installs helper + sudoers, and drops the legacy midnight reset so no stale
-    // schedule can revoke an authorization that is meant to persist
-    let script = format!(
-        "cp {} {} && chmod 755 {} && cp {} {} && chmod 440 {} && rm -f {} {} {}",
-        tmp_helper, HELPER_PATH, HELPER_PATH, tmp_sudoers, SUDOERS_PATH, SUDOERS_PATH, CRON_PATH, tmp_helper, tmp_sudoers
-    );
+    // The helper body and the username reach root as argv, never as files. Staging them under /tmp
+    // meant anything running as this user could rewrite both while the password prompt was open, and
+    // get its own helper body (arbitrary code as root) and sudoers rule (root, no password) installed.
+    let script = r#"set -eu
+helper_body="$1"
+user="$2"
+
+if [ -z "$user" ]; then echo "invalid username"; exit 1; fi
+case "$user" in
+  *[!A-Za-z0-9._-]*) echo "invalid username"; exit 1 ;;
+esac
+if ! command -v visudo >/dev/null 2>&1; then
+  echo "visudo not found; refusing to install a sudoers rule"
+  exit 1
+fi
+
+# stage the rule outside sudoers.d, validate it, then move it in atomically: a rule that does not
+# parse makes sudo refuse to run at all, so it must never land in that directory untested
+printf '%s ALL=(ALL) NOPASSWD: @HELPER@ @HOSTS_TMP@\n' "$user" > /etc/.focusblock.sudoers.new
+chown root:root /etc/.focusblock.sudoers.new
+chmod 440 /etc/.focusblock.sudoers.new
+if ! visudo -cf /etc/.focusblock.sudoers.new >/dev/null 2>&1; then
+  rm -f /etc/.focusblock.sudoers.new
+  echo "generated sudoers rule failed validation; nothing installed"
+  exit 1
+fi
+
+# only now touch the live files: helper first, rule second, so either both land or neither does
+printf '%s' "$helper_body" > @HELPER@
+chown root:root @HELPER@
+chmod 755 @HELPER@
+mv -f /etc/.focusblock.sudoers.new @SUDOERS@
+
+# legacy 0.1.1 midnight reset, if an older install left one behind
+rm -f @CRON@
+echo "ok"
+"#
+    .replace("@HELPER@", HELPER_PATH)
+    .replace("@SUDOERS@", SUDOERS_PATH)
+    .replace("@CRON@", CRON_PATH)
+    .replace("@HOSTS_TMP@", HOSTS_TMP_PATH);
+
     let out = Command::new("pkexec")
-        .args(["sh", "-c", &script])
+        .args([
+            "sh",
+            "-c",
+            script.as_str(),
+            "focusblock-enable",
+            helper_content,
+            user.as_str(),
+        ])
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -748,14 +792,6 @@ pub fn run() {
                                         .unwrap_or(false)
                                     {
                                         cleared = true;
-                                    } else if Command::new("sudo")
-                                        .args(["-n", "cp", &tmp_path, HOSTS_PATH])
-                                        .output()
-                                        .map(|o| o.status.success())
-                                        .unwrap_or(false)
-                                    {
-                                        cleared = true;
-                                        flush_dns();
                                     }
                                 }
                                 if !cleared {

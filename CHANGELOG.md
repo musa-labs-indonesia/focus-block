@@ -14,6 +14,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Ad-hoc code signing for the macOS bundle (`bundle.macOS.signingIdentity: "-"`), so Gatekeeper
   reports "unidentified developer" rather than a damaged app. No Apple Developer account required.
 
+### Security
+
+- **The install path no longer hands root a file it can be tricked into trusting.** `enable_saved_auth`
+  staged the helper body and the sudoers rule under `/tmp` and had `pkexec` copy them, so anything
+  running as the user could rewrite both while the password dialog was open — that is arbitrary code as
+  root plus a root rule of the attacker's choosing. Both now travel as argv into a fixed root-side
+  script that renders and validates everything itself; nothing user-writable is read as root.
+- **The sudoers rule is validated before it is installed.** An unparseable file in `/etc/sudoers.d`
+  makes `sudo` refuse to run system-wide, so the rule is staged outside that directory and checked with
+  `visudo -cf` first.
+- **Install is all-or-nothing.** The rule is staged and validated before either live file is touched, so
+  a failed install leaves the previous state intact instead of a new helper paired with an old rule.
+- `chown root:root` is explicit on both installed files rather than inherited from `pkexec`.
+- The username fallback is gone. A failed detection used to write a rule for that hardcoded name; it now
+  errors out, and the name is restricted to `[A-Za-z0-9._-]` before it reaches the rule.
+- Dropped the Linux `sudo -n cp` fallbacks that could write `/etc/hosts` without passing through the
+  helper, so the helper stays the single passwordless entry point. macOS keeps its `sudo -n` attempt,
+  which only succeeds on the user's own cached sudo ticket and grants nothing extra.
+
 ### Changed
 
 - **Day-session is now Saved authorization.** One authorization instead of a per-day one: it no longer
