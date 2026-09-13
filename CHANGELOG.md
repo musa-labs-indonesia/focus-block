@@ -32,9 +32,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Dropped the Linux `sudo -n cp` fallbacks that could write `/etc/hosts` without passing through the
   helper, so the helper stays the single passwordless entry point. macOS keeps its `sudo -n` attempt,
   which only succeeds on the user's own cached sudo ticket and grants nothing extra.
+- **The passwordless helper no longer writes caller-supplied content.** It used to copy a file whose
+  bytes anyone running as the user could choose — arbitrary `/etc/hosts` content without a password
+  (redirect or blackhole any domain), and a time-of-check/time-of-use gap where `[ -L ]` then `cp`
+  could be raced into copying a root-only file such as `/root/.ssh/id_rsa` into world-readable
+  `/etc/hosts`. The helper now takes `block <domain>…` / `clear`, validates every name against
+  `a-z0-9.-`, and renders the `127.0.0.1` / `::1` lines itself, so the worst a hostile caller can do is
+  ask for a domain to be blocked. There is no staging file left to race, pre-create or symlink, and the
+  passwordless path no longer touches `/tmp` at all.
+- **`/etc/hosts` is replaced atomically.** The section is built beside it and moved into place, so a
+  crash mid-write can no longer truncate the file and take DNS down for the whole machine.
 
 ### Changed
 
+- **Helper protocol changed to `block <domain>…` / `clear`** and the sudoers rule with it. A helper
+  installed by 0.1.1/0.2.0 only understands a file path, so the app keeps driving it in its old protocol
+  until you re-enable; `check_saved_auth` reports `helper_version` and Settings shows a notice when the
+  installed helper is outdated, otherwise the upgrade would silently leave the old behaviour in place.
+- Window-close cleanup now calls `deactivate_blocks` instead of carrying its own copy of the privileged
+  write, so there is one implementation of that path rather than two that could drift.
+- `www.` aliases are expanded in `expand_sites` instead of `build_block_section`, which is now a plain
+  renderer that matches what the helper produces for the same domain list (verified byte-for-byte).
 - **Day-session is now Saved authorization.** One authorization instead of a per-day one: it no longer
   resets at midnight, so it stays on until you disable it. Disabling still restores a password prompt at
   every Start and End. Upgrading from 0.1.1: the old `0 0 * * *` job removes itself at the next midnight,

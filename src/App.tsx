@@ -64,7 +64,7 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [blockStatus, setBlockStatus] = useState<{ active: boolean; sites: string[] } | null>(null);
   const [globalInput, setGlobalInput] = useState("");
-  const [savedAuth, setSavedAuth] = useState<{ enabled: boolean; platform: string } | null>(null);
+  const [savedAuth, setSavedAuth] = useState<{ enabled: boolean; platform: string; helper_version: number } | null>(null);
   const [page, setPage] = useState<"focus" | "settings">("focus");
   const [hostsPreview, setHostsPreview] = useState<string | null>(null);
   const [dbLoaded, setDbLoaded] = useState(false);
@@ -329,7 +329,7 @@ export default function App() {
   }
   async function refreshSavedAuth() {
     try {
-      const res = await invoke<{ enabled: boolean; platform: string }>("check_saved_auth");
+      const res = await invoke<{ enabled: boolean; platform: string; helper_version: number }>("check_saved_auth");
       setSavedAuth(res);
     } catch {
       setSavedAuth(null);
@@ -883,6 +883,7 @@ export default function App() {
                     <button onClick={() => {refreshBlockStatus(); refreshSavedAuth(); refreshHostsPreview(); showToast("Settings refreshed");}} className="min-h-11 px-4 py-2 rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-700 text-sm font-semibold hover:bg-zinc-50 dark:bg-zinc-800">Refresh status</button>
                   </div>
                   <p className="text-xs text-zinc-400 mt-3">{savedAuth && savedAuth.platform !== "linux" ? "Linux only — macOS and Windows ask for system permission at each session start and finish." : "Disabled means Focus Block asks for permission at each session start and finish. Enabling requires one system authorization, then never again until you disable it."}</p>
+                  {savedAuth?.enabled && savedAuth.helper_version === 1 && <p className="mt-3 border-l-2 border-amber-300 pl-3 text-xs text-amber-800">Installed by an older version, still using the old helper. Disable and enable saved authorization again to upgrade it — one password.</p>}
                 </section>
 
                 <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="hosts-heading">

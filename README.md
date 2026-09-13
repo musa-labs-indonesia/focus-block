@@ -16,10 +16,13 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
 
 ## How Blocking Works
 
-1. Start merges `globalBlocks + todo.blockedSites` → `expand_sites` (normalize, dedup, alias expand)
+1. Start merges `globalBlocks + todo.blockedSites` → `expand_sites` (normalize, dedup, alias expand, add `www.` for two-label domains)
 2. Reads `/etc/hosts`, strips old block, builds `build_block_section`, writes via:
-   `try_write_hosts_direct` → `sudo -n helper` → `sudo -n cp` → `pkexec cp` (fallback)
-3. `deactivate_blocks` on timer end / window close (best-effort, with saved-auth `sudo -n` path) / orphan recovery on next launch
+   `try_write_hosts_direct` → `sudo -n helper block <domains…>` → `pkexec cp` (prompt, fallback)
+   The helper takes the domain list, not a file: it validates each name and renders the section itself, so
+   nothing this app can write is handed to root. A 0.1.1-era helper that only accepts a path is still driven
+   in its own protocol until you re-enable, and Settings says so.
+3. `deactivate_blocks` on timer end / window close (best-effort, and the only implementation of that path) / orphan recovery on next launch
 
 ## Tech Stack
 
@@ -109,7 +112,7 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 2. **Global blocks** — Settings → `🌐 Global blocks` → `youtube.com` Enter. Locked during session.
 3. **Start** — `▶ Start` merges global+per-task → prompts for password (or no prompt if saved authorization is enabled) → timer runs, UI locked, close blocked, `Hosts diagnostics` shows `⛔ N sites blocked`
 4. **Finish** — auto `deactivate_blocks` + toast `is complete. Blocks cleared.` + `refreshBlockStatus`. Close button prevented until finish (toast `Cannot close — session running.`).
-5. **Saved authorization** — Settings → `Enable saved authorization` → one `pkexec` → creates helper + sudoers `muhsalaa ALL=(ALL) NOPASSWD: /usr/local/bin/focusblock-apply /tmp/focusblock_hosts_tmp`. No password from then on, for every session, until you `Disable` (which removes both files). No schedule is installed — the old `0 0 * * *` reset is deleted when you enable.
+5. **Saved authorization** — Settings → `Enable saved authorization` → one `pkexec` → installs helper + sudoers `muhsalaa ALL=(ALL) NOPASSWD: /usr/local/bin/focusblock-apply block *, /usr/local/bin/focusblock-apply clear`. No password from then on, for every session, until you `Disable` (which removes both files). No schedule is installed — the old `0 0 * * *` reset is deleted when you enable.
 6. **Search** — Focus page → `Find a task` filters by title
 7. **Edit/Delete** — `✎` / `✕` disabled during session; running task cannot be edited/deleted
 
@@ -132,13 +135,14 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 ## Permissions
 
 - **First Start/End without saved authorization:** `pkexec` dialog (system password)
-- **Saved authorization enabled:** `sudo -n /usr/local/bin/focusblock-apply /tmp/focusblock_hosts_tmp` (no prompt). Helper validates tmp (exists, not symlink, 0 < size ≤100KB) then `cp /tmp/focusblock_hosts_tmp /etc/hosts`
+- **Saved authorization enabled:** `sudo -n /usr/local/bin/focusblock-apply block <domain>…` (no prompt) and `sudo -n /usr/local/bin/focusblock-apply clear`. The helper validates every name against `a-z0-9.-` and renders the `127.0.0.1` / `::1` lines itself, then swaps the file in with `mv` — it never copies caller-supplied content, so a hostile caller can at most ask to block a domain, and a crash can't leave `/etc/hosts` half-written
 - **Files:** `/usr/local/bin/focusblock-apply` `755`, `/etc/sudoers.d/focusblock` `440`, both `root:root`. One `pkexec` stages the rule, validates it with `visudo -cf`, and only then installs — a rule that does not parse never reaches `sudoers.d`, and a failed install changes nothing. No cron file is installed — `/etc/cron.d/focusblock` only ever appears as a leftover from 0.1.1 and is removed on enable
-- **Check:** `sudo -n -l` should show `(ALL) NOPASSWD: /usr/local/bin/focusblock-apply ...`; `pkexec cat /etc/sudoers.d/focusblock` to inspect
+- **Check:** `sudo -n -l` should show `(ALL) NOPASSWD: /usr/local/bin/focusblock-apply block *, /usr/local/bin/focusblock-apply clear`; `pkexec cat /etc/sudoers.d/focusblock` to inspect. `head -2 /usr/local/bin/focusblock-apply` should show `# focusblock-helper v2`
 
 ## Troubleshooting
 
-- **Saved authorization still asks password:** `pkexec chmod 755 /usr/local/bin/focusblock-apply; pkexec chmod 440 /etc/sudoers.d/focusblock; pkexec visudo -c` — must be `parsed OK`. Then `sudo -n /usr/local/bin/focusblock-apply /tmp/focusblock_hosts_tmp` should `EXIT:0`. If still prompts, re-enable in Settings (disable → enable).
+- **Settings warns the helper is from an older version:** the install predates the domain-list protocol and still accepts a file path. `Disable` then `Enable` saved authorization to replace it — one password.
+- **Saved authorization still asks password:** `pkexec chmod 755 /usr/local/bin/focusblock-apply; pkexec chmod 440 /etc/sudoers.d/focusblock; pkexec visudo -c` — must be `parsed OK`. Then `sudo -n /usr/local/bin/focusblock-apply clear` should `EXIT:0`. If still prompts, re-enable in Settings (disable → enable).
 - **Orphan block after kill -9 / close reject:** next launch auto-detects `get_block_status().active && no active_session` → tries `deactivate_blocks` and shows `Orphaned block cleared` or manual clear prompt. Manual: `pkexec sed -i '/# BEGIN BLOCKER2/,/# END BLOCKER2/d' /etc/hosts`
 - **Cannot close during session:** intentional — finish timer (no pause). If stuck, `kill` the `focus-block` process; on next launch orphan recovery will clear.
 - **Sites not blocked:** check `Settings → Hosts diagnostics` preview contains `127.0.0.1 youtube.com` + `::1`; try `ping youtube.com` → should resolve `127.0.0.1`. Check `/etc/hosts` for block, `resolvectl flush-caches`.

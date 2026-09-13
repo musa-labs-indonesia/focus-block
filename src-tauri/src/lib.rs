@@ -163,8 +163,17 @@ fn expand_sites(sites: Vec<String>) -> Vec<String> {
     for raw in sites {
         if let Some(domain) = normalize_domain(&raw) {
             for alias in domain_aliases(&domain) {
+                // `www.` is only a real host for a two-label domain; adding it to www.m.youtube.com or
+                // youtu.be would be noise. This is the one place that rule lives — the privileged
+                // helper renders whatever list it is handed.
                 if uniq.insert(alias.clone()) {
-                    out.push(alias);
+                    out.push(alias.clone());
+                }
+                if alias.split('.').count() == 2 {
+                    let www = format!("www.{}", alias);
+                    if uniq.insert(www.clone()) {
+                        out.push(www);
+                    }
                 }
             }
         }
@@ -172,6 +181,8 @@ fn expand_sites(sites: Vec<String>) -> Vec<String> {
     out
 }
 
+// Renders the managed section. The root helper renders the same lines from the same list, so keep the
+// two in step: one 127.0.0.1 and one ::1 line per domain, nothing else.
 fn build_block_section(sites: &[String]) -> String {
     if sites.is_empty() {
         return String::new();
@@ -180,14 +191,8 @@ fn build_block_section(sites: &[String]) -> String {
     lines.push(MARKER_START.to_string());
     lines.push("# Managed by Focus Block - do not edit manually".to_string());
     for domain in sites {
-        // block apex and www — only add www for apex domains (2 parts) to avoid www.m.youtube.com nonsense
-        let is_apex = domain.split('.').count() == 2;
         lines.push(format!("127.0.0.1 {}", domain));
         lines.push(format!("::1 {}", domain));
-        if is_apex {
-            lines.push(format!("127.0.0.1 www.{}", domain));
-            lines.push(format!("::1 www.{}", domain));
-        }
     }
     lines.push(MARKER_END.to_string());
     lines.join("\n") + "\n"
@@ -219,6 +224,56 @@ fn is_block_active(content: &str) -> bool {
     content.contains(MARKER_START) || content.contains(MARKER_START_OLD)
 }
 
+// The helper advertises its protocol so an upgrade can keep speaking to the old one instead of
+// breaking a working install: v1 accepted a file path, v2 renders the block itself.
+const HELPER_V2_MARKER: &str = "# focusblock-helper v2";
+
+/// 0 = not installed, 1 = file-path helper, 2 = renders the block from validated domains.
+/// The file is root-owned inside a root-owned directory, so nobody unprivileged can rewrite it, and
+/// it is the exact code that will run as root — which is why it can be trusted to report its version.
+fn installed_helper_version() -> u8 {
+    match fs::read_to_string(HELPER_PATH) {
+        Ok(body) if body.contains(HELPER_V2_MARKER) => 2,
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// Write using the standing authorization if we hold one. Never prompts.
+/// Empty `domains` means "clear the block"; `v1_content` is only needed by a v1 helper, which can
+/// only write a file — that fallback exists so 0.2.0 installs keep working until they re-enable.
+#[cfg(target_os = "linux")]
+fn try_write_with_saved_auth(domains: &[String], v1_content: &str) -> bool {
+    if !is_saved_auth_active() {
+        return false;
+    }
+    if installed_helper_version() >= 2 {
+        let mut args: Vec<String> = vec!["-n".into(), HELPER_PATH.into()];
+        if domains.is_empty() {
+            args.push("clear".into());
+        } else {
+            args.push("block".into());
+            args.extend(domains.iter().cloned());
+        }
+        return Command::new("sudo")
+            .args(&args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+    }
+    let tmp_path = tmp_hosts_path();
+    if fs::write(&tmp_path, v1_content).is_err() {
+        return false;
+    }
+    let ok = Command::new("sudo")
+        .args(["-n", HELPER_PATH, &tmp_path])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let _ = fs::remove_file(&tmp_path);
+    ok
+}
+
 fn try_write_hosts_direct(content: &str) -> Result<(), String> {
     fs::write(HOSTS_PATH, content).map_err(|e| e.to_string())
 }
@@ -242,27 +297,29 @@ fn is_saved_auth_active() -> bool {
     false
 }
 
-fn write_hosts_privileged(content: &str) -> Result<(), String> {
+// `domains` is only consumed on Linux, where the helper takes the list instead of the rendered file.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn write_hosts_privileged(content: &str, domains: &[String]) -> Result<(), String> {
     if try_write_hosts_direct(content).is_ok() {
         return Ok(());
     }
+    // The standing authorization carries the domain list, not the rendered file, so the root side
+    // validates and renders it itself and no /tmp staging happens on this path at all.
+    #[cfg(target_os = "linux")]
+    {
+        if try_write_with_saved_auth(domains, content) {
+            flush_dns();
+            return Ok(());
+        }
+    }
+
+    // Otherwise a prompt is unavoidable: stage the rendered file for pkexec / osascript / RunAs. This
+    // path only runs when the user is actively authorizing this write.
     let tmp_path = tmp_hosts_path();
     fs::write(&tmp_path, content).map_err(|e| format!("tmp write failed: {}", e))?;
 
     #[cfg(target_os = "linux")]
     {
-        // only the installed helper gets a passwordless path; a bare `sudo -n cp` relied on whatever
-        // broader sudo rights the machine happens to have, and would sidestep the helper entirely
-        if is_saved_auth_active() {
-            let helper_try = Command::new("sudo").args(["-n", HELPER_PATH, &tmp_path]).output();
-            if let Ok(out) = helper_try {
-                if out.status.success() {
-                    let _ = fs::remove_file(&tmp_path);
-                    flush_dns();
-                    return Ok(());
-                }
-            }
-        }
         let pkexec_try = Command::new("pkexec").args(["cp", &tmp_path, HOSTS_PATH]).output();
         match pkexec_try {
             Ok(out) if out.status.success() => {
@@ -367,7 +424,7 @@ fn activate_blocks(sites: Vec<String>) -> Result<String, String> {
     }
     new_content.push_str(&block_section);
 
-    write_hosts_privileged(&new_content)?;
+    write_hosts_privileged(&new_content, &domains)?;
     flush_dns();
     Ok(format!("Blocked {} site(s): {}", domains.len(), domains.join(", ")))
 }
@@ -382,7 +439,7 @@ fn deactivate_blocks() -> Result<String, String> {
         return Ok("No active blocks".to_string());
     }
     let stripped = strip_existing_block(&current);
-    write_hosts_privileged(&stripped)?;
+    write_hosts_privileged(&stripped, &[])?;
     flush_dns();
     Ok("All blocks cleared".to_string())
 }
@@ -433,6 +490,7 @@ fn check_saved_auth() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "platform": std::env::consts::OS,
         "enabled": is_saved_auth_active(),
+        "helper_version": installed_helper_version(),
     }))
 }
 
@@ -479,18 +537,61 @@ fn current_username() -> Result<String, String> {
 fn enable_saved_auth() -> Result<String, String> {
     // helper script validates tmp and does cp + flush
     let helper_content = r#"#!/bin/sh
-set -e
-TMP="$1"
-if [ -z "$TMP" ]; then echo "missing arg"; exit 1; fi
-if [ ! -f "$TMP" ]; then echo "tmp not found: $TMP"; exit 1; fi
-if [ -L "$TMP" ]; then echo "symlink not allowed"; exit 1; fi
-SZ=$(wc -c < "$TMP" 2>/dev/null || echo 0)
-if [ "$SZ" -gt 102400 ]; then echo "too large"; exit 1; fi
-# basic safety: must contain our marker or be a valid hosts file (at least localhost)
-# allow both block and unblock (with or without marker) — just ensure not empty
-if [ "$SZ" -eq 0 ]; then echo "empty"; exit 1; fi
-cp "$TMP" /etc/hosts
+# focusblock-helper v2
+# Run as root by the app: `focusblock-apply block <domain>...` or `focusblock-apply clear`.
+# The section is rendered here from validated names, so no caller-supplied bytes reach /etc/hosts and
+# there is no staging file to race, pre-create or symlink.
+set -eu
+
+HOSTS=/etc/hosts
+STAGE=/etc/.focusblock.hosts.new
+MAX_DOMAINS=500
+
+# drop the managed region (current markers and the 0.1.1 BLOCKER2 pair), keep everything else
+strip_block() {
+  awk '
+    /^[[:space:]]*# BEGIN FOCUSBLOCKER[[:space:]]*$/ { skip = 1; next }
+    /^[[:space:]]*# BEGIN BLOCKER2[[:space:]]*$/     { skip = 1; next }
+    /^[[:space:]]*# END FOCUSBLOCKER[[:space:]]*$/   { skip = 0; next }
+    /^[[:space:]]*# END BLOCKER2[[:space:]]*$/       { skip = 0; next }
+    !skip { print }
+  ' "$HOSTS"
+}
+
+case "${1:-}" in
+  block)
+    shift
+    [ "$#" -ge 1 ] || { echo "block needs at least one domain"; exit 1; }
+    [ "$#" -le "$MAX_DOMAINS" ] || { echo "too many domains"; exit 1; }
+    for d in "$@"; do
+      [ -n "$d" ] || { echo "empty domain"; exit 1; }
+      [ "${#d}" -le 253 ] || { echo "domain too long"; exit 1; }
+      case "$d" in
+        *[!a-z0-9.-]*) echo "invalid domain"; exit 1 ;;
+      esac
+    done
+    {
+      strip_block
+      printf '# BEGIN FOCUSBLOCKER\n# Managed by Focus Block - do not edit manually\n'
+      for d in "$@"; do
+        printf '127.0.0.1 %s\n::1 %s\n' "$d" "$d"
+      done
+      printf '# END FOCUSBLOCKER\n'
+    } > "$STAGE"
+    ;;
+  clear)
+    strip_block > "$STAGE"
+    ;;
+  *)
+    echo "usage: focusblock-apply block <domain>... | clear"; exit 1 ;;
+esac
+
+# same filesystem, so this swap is atomic — a crash can't leave a half-written hosts file
+chown root:root "$STAGE"
+chmod 644 "$STAGE"
+mv -f "$STAGE" "$HOSTS"
 resolvectl flush-caches 2>/dev/null || systemd-resolve --flush-caches 2>/dev/null || true
+echo ok
 "#;
     let user = current_username()?;
 
@@ -512,7 +613,7 @@ fi
 
 # stage the rule outside sudoers.d, validate it, then move it in atomically: a rule that does not
 # parse makes sudo refuse to run at all, so it must never land in that directory untested
-printf '%s ALL=(ALL) NOPASSWD: @HELPER@ @HOSTS_TMP@\n' "$user" > /etc/.focusblock.sudoers.new
+printf '%s ALL=(ALL) NOPASSWD: @HELPER@ block *, @HELPER@ clear\n' "$user" > /etc/.focusblock.sudoers.new
 chown root:root /etc/.focusblock.sudoers.new
 chmod 440 /etc/.focusblock.sudoers.new
 if ! visudo -cf /etc/.focusblock.sudoers.new >/dev/null 2>&1; then
@@ -533,8 +634,7 @@ echo "ok"
 "#
     .replace("@HELPER@", HELPER_PATH)
     .replace("@SUDOERS@", SUDOERS_PATH)
-    .replace("@CRON@", CRON_PATH)
-    .replace("@HOSTS_TMP@", HOSTS_TMP_PATH);
+    .replace("@CRON@", CRON_PATH);
 
     let out = Command::new("pkexec")
         .args([
@@ -772,52 +872,9 @@ pub fn run() {
                         }
                     }
                 }
-                // best-effort hosts cleanup — try direct, then saved-auth helper (no prompt), then pkexec
-                if let Ok(content) = fs::read_to_string(HOSTS_PATH) {
-                    if is_block_active(&content) {
-                        let stripped = strip_existing_block(&content);
-                        let _ = try_write_hosts_direct(&stripped);
-                        if fs::read_to_string(HOSTS_PATH)
-                            .map(|c| is_block_active(&c))
-                            .unwrap_or(false)
-                        {
-                            let tmp_path = tmp_hosts_path();
-                            if fs::write(&tmp_path, &stripped).is_ok() {
-                                let mut cleared = false;
-                                if is_saved_auth_active() {
-                                    if Command::new("sudo")
-                                        .args(["-n", HELPER_PATH, &tmp_path])
-                                        .output()
-                                        .map(|o| o.status.success())
-                                        .unwrap_or(false)
-                                    {
-                                        cleared = true;
-                                    }
-                                }
-                                if !cleared {
-                                    #[cfg(target_os = "linux")]
-                                    {
-                                        let _ = Command::new("pkexec").args(["cp", &tmp_path, HOSTS_PATH]).output();
-                                    }
-                                    #[cfg(target_os = "macos")]
-                                    {
-                                        let _ = Command::new("osascript")
-                                            .args(["-e", &macos_admin_write_hosts(&tmp_path)])
-                                            .output();
-                                    }
-                                    #[cfg(target_os = "windows")]
-                                    {
-                                        let ps = format!("Start-Process -FilePath 'cmd' -ArgumentList '/c copy /Y \"{}\" \"{}\"' -Verb RunAs -Wait", tmp_path.replace('"', "\""), HOSTS_PATH.replace('"', "\""));
-                                        let _ = Command::new("powershell").args(["-Command", &ps]).output();
-                                    }
-                                } else {
-                                    flush_dns();
-                                }
-                                let _ = fs::remove_file(&tmp_path);
-                            }
-                        }
-                    }
-                }
+                // best-effort hosts cleanup on close — deactivate_blocks owns that logic, including
+                // which helper protocol is installed, so there is only one implementation to trust
+                let _ = deactivate_blocks();
                 // clear active_session so next launch doesn't resume with mismatched hosts
                 let app_handle = _window.app_handle();
                 if let Ok(conn) = get_conn(&app_handle) {
