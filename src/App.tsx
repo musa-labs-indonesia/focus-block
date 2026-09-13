@@ -64,7 +64,7 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [blockStatus, setBlockStatus] = useState<{ active: boolean; sites: string[] } | null>(null);
   const [globalInput, setGlobalInput] = useState("");
-  const [daySession, setDaySession] = useState<{ active: boolean; cron_active: boolean; platform: string } | null>(null);
+  const [savedAuth, setSavedAuth] = useState<{ enabled: boolean; platform: string } | null>(null);
   const [page, setPage] = useState<"focus" | "settings">("focus");
   const [hostsPreview, setHostsPreview] = useState<string | null>(null);
   const [dbLoaded, setDbLoaded] = useState(false);
@@ -327,30 +327,30 @@ export default function App() {
       setBlockStatus(null);
     }
   }
-  async function refreshDaySession() {
+  async function refreshSavedAuth() {
     try {
-      const res = await invoke<{ active: boolean; cron_active: boolean; platform: string }>("check_day_session");
-      setDaySession(res);
+      const res = await invoke<{ enabled: boolean; platform: string }>("check_saved_auth");
+      setSavedAuth(res);
     } catch {
-      setDaySession(null);
+      setSavedAuth(null);
     }
   }
-  async function enableDaySession() {
+  async function enableSavedAuth() {
     try {
-      const msg = await invoke<string>("setup_day_session");
-      await refreshDaySession();
+      const msg = await invoke<string>("enable_saved_auth");
+      await refreshSavedAuth();
       showToast(msg);
     } catch (e: any) {
-      showToast(`Unable to enable day session: ${String(e).slice(0, 140)}`);
+      showToast(`Unable to enable saved authorization: ${String(e).slice(0, 140)}`);
     }
   }
-  async function disableDaySession() {
+  async function disableSavedAuth() {
     try {
-      const msg = await invoke<string>("disable_day_session");
-      await refreshDaySession();
+      const msg = await invoke<string>("disable_saved_auth");
+      await refreshSavedAuth();
       showToast(msg);
     } catch (e: any) {
-      showToast(`Unable to disable day session: ${String(e).slice(0, 140)}`);
+      showToast(`Unable to disable saved authorization: ${String(e).slice(0, 140)}`);
     }
   }
   async function refreshHostsPreview() {
@@ -363,13 +363,13 @@ export default function App() {
   }
   useEffect(() => {
     refreshBlockStatus();
-    refreshDaySession();
+    refreshSavedAuth();
     refreshHostsPreview();
   }, []);
   useEffect(() => {
     if (page === "settings") {
       refreshBlockStatus();
-      refreshDaySession();
+      refreshSavedAuth();
       refreshHostsPreview();
     }
   }, [page]);
@@ -867,23 +867,22 @@ export default function App() {
               </section>
 
               <div className="grid gap-x-8 gap-y-8 lg:grid-cols-2">
-                <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="day-session-heading">
+                <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="saved-auth-heading">
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <h3 id="day-session-heading" className="font-bold text-base">Day-session reset</h3>
-                      <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Authorize blocking once per calendar day. The schedule clears the hosts file at midnight.</p>
+                      <h3 id="saved-auth-heading" className="font-bold text-base">Saved authorization</h3>
+                      <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Authorize once and Focus Block stops asking for a password — no daily reset.</p>
                     </div>
-                    <span className={`shrink-0 px-2.5 py-1 rounded text-xs font-bold border ${daySession?.active ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-zinc-100 border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400"}`}>{daySession?.active ? "Enabled" : "Disabled"}</span>
+                    <span className={`shrink-0 px-2.5 py-1 rounded text-xs font-bold border ${savedAuth?.enabled ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-zinc-100 border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400"}`}>{savedAuth?.enabled ? "Enabled" : "Disabled"}</span>
                   </div>
                   <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
-                    <span className={`px-2 py-1 rounded border ${daySession?.cron_active ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-zinc-100 border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400"}`}>{daySession?.cron_active ? "Midnight reset active" : "Midnight reset not set"}</span>
                     {blockStatus?.active ? <span className="px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700">⛔ {blockStatus.sites.length} sites blocked now</span> : <span className="px-2 py-1 rounded bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400">No sites blocked now</span>}
                   </div>
                   <div className="mt-5 flex flex-wrap gap-2">
-                    {daySession?.platform !== "macos" && daySession?.platform !== "windows" && (daySession?.active ? <button onClick={disableDaySession} className="min-h-11 px-4 py-2 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-semibold hover:bg-black">Disable day session</button> : <button onClick={enableDaySession} className="min-h-11 px-4 py-2 rounded-md bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700">Enable day session</button>)}
-                    <button onClick={() => {refreshBlockStatus(); refreshDaySession(); refreshHostsPreview(); showToast("Settings refreshed");}} className="min-h-11 px-4 py-2 rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-700 text-sm font-semibold hover:bg-zinc-50 dark:bg-zinc-800">Refresh status</button>
+                    {savedAuth?.platform !== "macos" && savedAuth?.platform !== "windows" && (savedAuth?.enabled ? <button onClick={disableSavedAuth} className="min-h-11 px-4 py-2 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-semibold hover:bg-black">Disable saved authorization</button> : <button onClick={enableSavedAuth} className="min-h-11 px-4 py-2 rounded-md bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700">Enable saved authorization</button>)}
+                    <button onClick={() => {refreshBlockStatus(); refreshSavedAuth(); refreshHostsPreview(); showToast("Settings refreshed");}} className="min-h-11 px-4 py-2 rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-700 text-sm font-semibold hover:bg-zinc-50 dark:bg-zinc-800">Refresh status</button>
                   </div>
-                  <p className="text-xs text-zinc-400 mt-3">{daySession && daySession.platform !== "linux" ? "Linux only — macOS and Windows ask for system permission at each session start and finish." : "Disabled means Focus Block asks for permission at each session start and finish. Enabling requires one system authorization."}</p>
+                  <p className="text-xs text-zinc-400 mt-3">{savedAuth && savedAuth.platform !== "linux" ? "Linux only — macOS and Windows ask for system permission at each session start and finish." : "Disabled means Focus Block asks for permission at each session start and finish. Enabling requires one system authorization, then never again until you disable it."}</p>
                 </section>
 
                 <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="hosts-heading">

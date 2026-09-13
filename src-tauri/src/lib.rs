@@ -14,7 +14,11 @@ const MARKER_END: &str = "# END FOCUSBLOCKER";
 const MARKER_START_OLD: &str = "# BEGIN BLOCKER2";
 const MARKER_END_OLD: &str = "# END BLOCKER2";
 const HELPER_PATH: &str = "/usr/local/bin/focusblock-apply";
+#[cfg(target_os = "linux")]
 const SUDOERS_PATH: &str = "/etc/sudoers.d/focusblock";
+// legacy: 0.1.1 installed this to wipe the helper at midnight. Only ever removed now, so a stale
+// copy from an older install cannot silently revoke an authorization meant to persist.
+#[cfg(target_os = "linux")]
 const CRON_PATH: &str = "/etc/cron.d/focusblock";
 
 fn tmp_hosts_path() -> String {
@@ -227,11 +231,11 @@ fn macos_admin_write_hosts(tmp_path: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn is_day_session_active() -> bool {
+fn is_saved_auth_active() -> bool {
     fs::metadata(HELPER_PATH).is_ok() && fs::metadata(SUDOERS_PATH).is_ok()
 }
 #[cfg(not(target_os = "linux"))]
-fn is_day_session_active() -> bool {
+fn is_saved_auth_active() -> bool {
     false
 }
 
@@ -244,7 +248,7 @@ fn write_hosts_privileged(content: &str) -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        if is_day_session_active() {
+        if is_saved_auth_active() {
             let helper_try = Command::new("sudo").args(["-n", HELPER_PATH, &tmp_path]).output();
             if let Ok(out) = helper_try {
                 if out.status.success() {
@@ -281,7 +285,7 @@ fn write_hosts_privileged(content: &str) -> Result<(), String> {
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
                 let _ = fs::remove_file(&tmp_path);
-                return Err(format!("pkexec failed: {} | host write requires admin (pkexec/sudo). Tip: enable day-session for password once per day.", stderr.trim()));
+                return Err(format!("pkexec failed: {} | host write requires admin (pkexec/sudo). Tip: enable saved authorization to skip this prompt.", stderr.trim()));
             }
             Err(e) => {
                 let _ = fs::remove_file(&tmp_path);
@@ -437,29 +441,16 @@ fn preview_hosts() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn check_day_session() -> Result<serde_json::Value, String> {
-    let active = is_day_session_active();
-    let cron_active = fs::metadata(CRON_PATH).is_ok();
-    // get mtime for display
-    let mtime = fs::metadata(SUDOERS_PATH)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+fn check_saved_auth() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "platform": std::env::consts::OS,
-        "active": active,
-        "cron_active": cron_active,
-        "helper": HELPER_PATH,
-        "sudoers": SUDOERS_PATH,
-        "mtime": mtime
+        "enabled": is_saved_auth_active(),
     }))
 }
 
 #[cfg(target_os = "linux")]
 #[tauri::command]
-fn setup_day_session() -> Result<String, String> {
+fn enable_saved_auth() -> Result<String, String> {
     // helper script validates tmp and does cp + flush
     let helper_content = r#"#!/bin/sh
 set -e
@@ -478,7 +469,6 @@ resolvectl flush-caches 2>/dev/null || systemd-resolve --flush-caches 2>/dev/nul
     // write helper to tmp first then pkexec to move to proper place
     let tmp_helper = "/tmp/focusblock-helper-tmp";
     let tmp_sudoers = "/tmp/focusblock-sudoers-tmp";
-    let tmp_cron = "/tmp/focusblock-cron-tmp";
     fs::write(tmp_helper, helper_content).map_err(|e| e.to_string())?;
     // get current user (tauri may not have USER env)
     let user = std::env::var("SUDO_USER")
@@ -502,13 +492,12 @@ resolvectl flush-caches 2>/dev/null || systemd-resolve --flush-caches 2>/dev/nul
     // sudoers: allow helper with tmp arg, tight
     let sudoers_content = format!("{} ALL=(ALL) NOPASSWD: {} /tmp/focusblock_hosts_tmp\n", user, HELPER_PATH);
     fs::write(tmp_sudoers, &sudoers_content).map_err(|e| e.to_string())?;
-    let cron_content = "0 0 * * * root rm -f /etc/sudoers.d/focusblock /usr/local/bin/focusblock-apply /etc/cron.d/focusblock\n";
-    fs::write(tmp_cron, cron_content).map_err(|e| e.to_string())?;
 
-    // use pkexec to install all 3 files atomically
+    // one pkexec prompt installs helper + sudoers, and drops the legacy midnight reset so no stale
+    // schedule can revoke an authorization that is meant to persist
     let script = format!(
-        "cp {} {} && chmod 755 {} && cp {} {} && chmod 440 {} && cp {} {} && chmod 644 {} && rm -f {} {} {}",
-        tmp_helper, HELPER_PATH, HELPER_PATH, tmp_sudoers, SUDOERS_PATH, SUDOERS_PATH, tmp_cron, CRON_PATH, CRON_PATH, tmp_helper, tmp_sudoers, tmp_cron
+        "cp {} {} && chmod 755 {} && cp {} {} && chmod 440 {} && rm -f {} {} {}",
+        tmp_helper, HELPER_PATH, HELPER_PATH, tmp_sudoers, SUDOERS_PATH, SUDOERS_PATH, CRON_PATH, tmp_helper, tmp_sudoers
     );
     let out = Command::new("pkexec")
         .args(["sh", "-c", &script])
@@ -519,18 +508,18 @@ resolvectl flush-caches 2>/dev/null || systemd-resolve --flush-caches 2>/dev/nul
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         return Err(format!("setup failed: {} {}", stderr.trim(), stdout.trim()));
     }
-    Ok("Day-session enabled: 1 password today, then no prompts until 00:00 (cron resets at midnight)".to_string())
+    Ok("Saved authorization enabled: no more password prompts — stays on until you disable it".to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
-fn setup_day_session() -> Result<String, String> {
-    Err("Day-session is Linux only — macOS/Windows will prompt each time".to_string())
+fn enable_saved_auth() -> Result<String, String> {
+    Err("Saved authorization is Linux only — macOS/Windows prompt each time".to_string())
 }
 
 #[cfg(target_os = "linux")]
 #[tauri::command]
-fn disable_day_session() -> Result<String, String> {
+fn disable_saved_auth() -> Result<String, String> {
     let script = format!("rm -f {} {} {}", HELPER_PATH, SUDOERS_PATH, CRON_PATH);
     let out = Command::new("pkexec")
         .args(["sh", "-c", &script])
@@ -544,13 +533,13 @@ fn disable_day_session() -> Result<String, String> {
     let _ = fs::remove_file(HELPER_PATH);
     let _ = fs::remove_file(SUDOERS_PATH);
     let _ = fs::remove_file(CRON_PATH);
-    Ok("Day-session disabled: will prompt every Start/End".to_string())
+    Ok("Saved authorization disabled: every Start and End will ask for a password".to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
-fn disable_day_session() -> Result<String, String> {
-    Err("Day-session is Linux only".to_string())
+fn disable_saved_auth() -> Result<String, String> {
+    Err("Saved authorization is Linux only".to_string())
 }
 
 // --- sqlite commands ---
@@ -707,9 +696,9 @@ pub fn run() {
             deactivate_blocks,
             get_block_status,
             preview_hosts,
-            check_day_session,
-            setup_day_session,
-            disable_day_session,
+            check_saved_auth,
+            enable_saved_auth,
+            disable_saved_auth,
             get_todos,
             sync_todos,
             get_global_blocks,
@@ -739,7 +728,7 @@ pub fn run() {
                         }
                     }
                 }
-                // best-effort hosts cleanup — try direct, then day-session helper (no prompt), then pkexec
+                // best-effort hosts cleanup — try direct, then saved-auth helper (no prompt), then pkexec
                 if let Ok(content) = fs::read_to_string(HOSTS_PATH) {
                     if is_block_active(&content) {
                         let stripped = strip_existing_block(&content);
@@ -751,7 +740,7 @@ pub fn run() {
                             let tmp_path = tmp_hosts_path();
                             if fs::write(&tmp_path, &stripped).is_ok() {
                                 let mut cleared = false;
-                                if is_day_session_active() {
+                                if is_saved_auth_active() {
                                     if Command::new("sudo")
                                         .args(["-n", HELPER_PATH, &tmp_path])
                                         .output()

@@ -9,7 +9,7 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
 - **Timer** — `MM:SS`, progress bar, auto-clears hosts on finish, locks edit/delete/add while running
 - **Hosts blocking** — `127.0.0.1` + `::1` for apex + `www.` alias, section `# BEGIN BLOCKER2` → `# END BLOCKER2`, `resolvectl`/`systemd-resolve` flush
 - **Domain aliases** — `twitter ↔ x.com ↔ t.co`, `youtube ↔ youtu.be ↔ m.youtube ↔ youtube-nocookie`, `instagram ↔ ig.me`, etc. (Rust `domain_aliases`)
-- **Day-session** — one password per day: helper `/usr/local/bin/focusblock-apply` + sudoers `/etc/sudoers.d/focusblock` + cron `0 0 * * *` reset, `sudo -n` path (no prompt after enable)
+- **Saved authorization** (Linux) — one password, then no prompts ever: helper `/usr/local/bin/focusblock-apply` + sudoers `/etc/sudoers.d/focusblock`, `sudo -n` path. Persists until disabled; disable restores a password at every Start/End
 - **SQLite** — `rusqlite 0.31 bundled` at `~/.local/share/com.muhsalaa.focusblock/focusblock.db` (WAL): `todos`, `global_blocks`, `active_session`; migrates once from `localStorage`
 - **Hard block close** — `CloseRequested` prevented while `active_session.end_at > now` (Rust + frontend `onCloseRequested` toast), orphan hosts auto-recovered on next launch
 - **Reject → no session** — if `pkexec`/`sudo` rejected, `activate_blocks` fails and session does not start
@@ -19,7 +19,7 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
 1. Start merges `globalBlocks + todo.blockedSites` → `expand_sites` (normalize, dedup, alias expand)
 2. Reads `/etc/hosts`, strips old block, builds `build_block_section`, writes via:
    `try_write_hosts_direct` → `sudo -n helper` → `sudo -n cp` → `pkexec cp` (fallback)
-3. `deactivate_blocks` on timer end / window close (best-effort, with day-session `sudo -n` path) / orphan recovery on next launch
+3. `deactivate_blocks` on timer end / window close (best-effort, with saved-auth `sudo -n` path) / orphan recovery on next launch
 
 ## Tech Stack
 
@@ -32,11 +32,11 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
 ```
 focus-block/
 ├── src/
-│   ├── App.tsx          # tasks, timer, global blocks, day-session UI, sqlite via invoke
+│   ├── App.tsx          # tasks, timer, global blocks, saved-authorization UI, sqlite via invoke
 │   ├── App.css, index.css, main.tsx
 │   └── assets/
 ├── src-tauri/
-│   ├── src/lib.rs       # hosts logic, day-session, sqlite (get_todos/sync_todos, get/set_global_blocks, get/save/clear_active_session), close handler
+│   ├── src/lib.rs       # hosts logic, saved authorization, sqlite (get_todos/sync_todos, get/set_global_blocks, get/save/clear_active_session), close handler
 │   ├── Cargo.toml       # tauri 2, rusqlite 0.31 bundled
 │   ├── tauri.conf.json  # com.muhsalaa.focusblock, 1100×750, bundle all
 │   └── icons/
@@ -101,15 +101,15 @@ xattr -dr com.apple.quarantine "/Applications/FocusBlock.app"
 
 Then Settings → Privacy & Security → **Open Anyway** if macOS still blocks it. Money-free fix for a proper signature later: an Apple Developer account + `APPLE_CERTIFICATE`/`APPLE_SIGNING_IDENTITY`/`APPLE_ID` secrets, no code changes needed.
 
-Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is `sudo -n` → `osascript … with administrator privileges`, so expect an admin prompt at each Start **and** Finish. **Day-session (password once per day) is Linux-only** — on macOS the toggle returns `Day-session is Linux only`.
+Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is `sudo -n` → `osascript … with administrator privileges`, so expect an admin prompt at each Start **and** Finish. **Saved authorization is Linux-only** — on macOS the toggle isn't offered, because there is no equivalent way to grant a standing rights escalation.
 
 ## Usage
 
 1. **Create task** — `New task` → title, duration (15/25/45/60 shortcuts), per-task domains (e.g. `youtube.com` — validates `a-z0-9.-`, strips `https://`, `www.`, port/path)
 2. **Global blocks** — Settings → `🌐 Global blocks` → `youtube.com` Enter. Locked during session.
-3. **Start** — `▶ Start` merges global+per-task → prompts for password (or no prompt if day-session enabled) → timer runs, UI locked, close blocked, `Hosts diagnostics` shows `⛔ N sites blocked`
+3. **Start** — `▶ Start` merges global+per-task → prompts for password (or no prompt if saved authorization is enabled) → timer runs, UI locked, close blocked, `Hosts diagnostics` shows `⛔ N sites blocked`
 4. **Finish** — auto `deactivate_blocks` + toast `is complete. Blocks cleared.` + `refreshBlockStatus`. Close button prevented until finish (toast `Cannot close — session running.`).
-5. **Day-session** — Settings → `Enable day session` → one `pkexec` → creates helper + sudoers `muhsalaa ALL=(ALL) NOPASSWD: /usr/local/bin/focusblock-apply /tmp/focusblock_hosts_tmp` + cron. Silent until `00:00`. `Disable` removes all three.
+5. **Saved authorization** — Settings → `Enable saved authorization` → one `pkexec` → creates helper + sudoers `muhsalaa ALL=(ALL) NOPASSWD: /usr/local/bin/focusblock-apply /tmp/focusblock_hosts_tmp`. No password from then on, for every session, until you `Disable` (which removes both files). No schedule is installed — the old `0 0 * * *` reset is deleted when you enable.
 6. **Search** — Focus page → `Find a task` filters by title
 7. **Edit/Delete** — `✎` / `✕` disabled during session; running task cannot be edited/deleted
 
@@ -131,14 +131,14 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 
 ## Permissions
 
-- **First Start/End without day-session:** `pkexec` dialog (system password)
-- **Day-session enabled:** `sudo -n /usr/local/bin/focusblock-apply /tmp/focusblock_hosts_tmp` (no prompt). Helper validates tmp (exists, not symlink, 0 < size ≤100KB) then `cp /tmp/focusblock_hosts_tmp /etc/hosts`
-- **Files:** `/usr/local/bin/focusblock-apply` `755`, `/etc/sudoers.d/focusblock` `440`, `/etc/cron.d/focusblock` `644`; `visudo -c` must be `parsed OK`
+- **First Start/End without saved authorization:** `pkexec` dialog (system password)
+- **Saved authorization enabled:** `sudo -n /usr/local/bin/focusblock-apply /tmp/focusblock_hosts_tmp` (no prompt). Helper validates tmp (exists, not symlink, 0 < size ≤100KB) then `cp /tmp/focusblock_hosts_tmp /etc/hosts`
+- **Files:** `/usr/local/bin/focusblock-apply` `755`, `/etc/sudoers.d/focusblock` `440`; `visudo -c` must be `parsed OK`. No cron file is installed — `/etc/cron.d/focusblock` only ever appears as a leftover from 0.1.1 and is removed on enable
 - **Check:** `sudo -n -l` should show `(ALL) NOPASSWD: /usr/local/bin/focusblock-apply ...`; `pkexec cat /etc/sudoers.d/focusblock` to inspect
 
 ## Troubleshooting
 
-- **Day-session still asks password:** `pkexec chmod 755 /usr/local/bin/focusblock-apply; pkexec chmod 440 /etc/sudoers.d/focusblock; pkexec visudo -c` — must be `parsed OK`. Then `sudo -n /usr/local/bin/focusblock-apply /tmp/focusblock_hosts_tmp` should `EXIT:0`. If still prompts, re-enable in Settings (disable → enable).
+- **Saved authorization still asks password:** `pkexec chmod 755 /usr/local/bin/focusblock-apply; pkexec chmod 440 /etc/sudoers.d/focusblock; pkexec visudo -c` — must be `parsed OK`. Then `sudo -n /usr/local/bin/focusblock-apply /tmp/focusblock_hosts_tmp` should `EXIT:0`. If still prompts, re-enable in Settings (disable → enable).
 - **Orphan block after kill -9 / close reject:** next launch auto-detects `get_block_status().active && no active_session` → tries `deactivate_blocks` and shows `Orphaned block cleared` or manual clear prompt. Manual: `pkexec sed -i '/# BEGIN BLOCKER2/,/# END BLOCKER2/d' /etc/hosts`
 - **Cannot close during session:** intentional — finish timer (no pause). If stuck, `kill` the `focus-block` process; on next launch orphan recovery will clear.
 - **Sites not blocked:** check `Settings → Hosts diagnostics` preview contains `127.0.0.1 youtube.com` + `::1`; try `ping youtube.com` → should resolve `127.0.0.1`. Check `/etc/hosts` for block, `resolvectl flush-caches`.

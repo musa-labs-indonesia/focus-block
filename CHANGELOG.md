@@ -16,6 +16,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Day-session is now Saved authorization.** One authorization instead of a per-day one: it no longer
+  resets at midnight, so it stays on until you disable it. Disabling still restores a password prompt at
+  every Start and End. Upgrading from 0.1.1: the old `0 0 * * *` job removes itself at the next midnight,
+  so the authorization is cleared once and then, re-enabled, is permanent (enabling also deletes the job
+  immediately if it is still present).
+- `check_day_session` → `check_saved_auth`, `setup_day_session` → `enable_saved_auth`,
+  `disable_day_session` → `disable_saved_auth`. The check response is now just `{ enabled, platform }` —
+  the previously returned `cron_active`, `helper`, `sudoers` and `mtime` fields were never read by the UI.
 - Release assets no longer include the raw `.app` directory — it was published as loose files and was
   not launchable. The `.dmg` is the macOS deliverable.
 - CI now actually passes the matrix `bundles` list to `tauri build --bundles`; previously the value
