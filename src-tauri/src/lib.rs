@@ -13,17 +13,8 @@ const MARKER_START: &str = "# BEGIN FOCUSBLOCKER";
 const MARKER_END: &str = "# END FOCUSBLOCKER";
 const MARKER_START_OLD: &str = "# BEGIN BLOCKER2";
 const MARKER_END_OLD: &str = "# END BLOCKER2";
-#[cfg(target_os = "linux")]
 const HELPER_PATH: &str = "/usr/local/bin/focusblock-apply";
-#[cfg(not(target_os = "linux"))]
-const HELPER_PATH: &str = "/usr/local/bin/focusblock-apply";
-#[cfg(target_os = "linux")]
 const SUDOERS_PATH: &str = "/etc/sudoers.d/focusblock";
-#[cfg(not(target_os = "linux"))]
-const SUDOERS_PATH: &str = "/etc/sudoers.d/focusblock";
-#[cfg(target_os = "linux")]
-const CRON_PATH: &str = "/etc/cron.d/focusblock";
-#[cfg(not(target_os = "linux"))]
 const CRON_PATH: &str = "/etc/cron.d/focusblock";
 
 fn tmp_hosts_path() -> String {
@@ -225,6 +216,16 @@ fn try_write_hosts_direct(content: &str) -> Result<(), String> {
     fs::write(HOSTS_PATH, content).map_err(|e| e.to_string())
 }
 
+// ponytail: macOS needs root for `killall mDNSResponder`, and the osascript prompt is the only root
+// we get — so the flush rides along instead of failing unprivileged afterwards.
+#[cfg(target_os = "macos")]
+fn macos_admin_write_hosts(tmp_path: &str) -> String {
+    format!(
+        "do shell script \"cp '{}' '{}' && (killall -HUP mDNSResponder || true)\" with administrator privileges",
+        tmp_path, HOSTS_PATH
+    )
+}
+
 #[cfg(target_os = "linux")]
 fn is_day_session_active() -> bool {
     fs::metadata(HELPER_PATH).is_ok() && fs::metadata(SUDOERS_PATH).is_ok()
@@ -299,7 +300,7 @@ fn write_hosts_privileged(content: &str) -> Result<(), String> {
                 return Ok(());
             }
         }
-        let script = format!("do shell script \"cp '{}' '{}'\" with administrator privileges", tmp_path, HOSTS_PATH);
+        let script = macos_admin_write_hosts(&tmp_path);
         let osascript = Command::new("osascript").args(["-e", &script]).output();
         match osascript {
             Ok(out) if out.status.success() => {
@@ -447,6 +448,7 @@ fn check_day_session() -> Result<serde_json::Value, String> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     Ok(serde_json::json!({
+        "platform": std::env::consts::OS,
         "active": active,
         "cron_active": cron_active,
         "helper": HELPER_PATH,
@@ -774,8 +776,9 @@ pub fn run() {
                                     }
                                     #[cfg(target_os = "macos")]
                                     {
-                                        let script = format!("do shell script \"cp '{}' '{}'\" with administrator privileges", tmp_path, HOSTS_PATH);
-                                        let _ = Command::new("osascript").args(["-e", &script]).output();
+                                        let _ = Command::new("osascript")
+                                            .args(["-e", &macos_admin_write_hosts(&tmp_path)])
+                                            .output();
                                     }
                                     #[cfg(target_os = "windows")]
                                     {

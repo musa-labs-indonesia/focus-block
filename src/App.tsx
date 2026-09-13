@@ -64,7 +64,7 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [blockStatus, setBlockStatus] = useState<{ active: boolean; sites: string[] } | null>(null);
   const [globalInput, setGlobalInput] = useState("");
-  const [daySession, setDaySession] = useState<{ active: boolean; cron_active: boolean } | null>(null);
+  const [daySession, setDaySession] = useState<{ active: boolean; cron_active: boolean; platform: string } | null>(null);
   const [page, setPage] = useState<"focus" | "settings">("focus");
   const [hostsPreview, setHostsPreview] = useState<string | null>(null);
   const [dbLoaded, setDbLoaded] = useState(false);
@@ -329,7 +329,7 @@ export default function App() {
   }
   async function refreshDaySession() {
     try {
-      const res = await invoke<{ active: boolean; cron_active: boolean }>("check_day_session");
+      const res = await invoke<{ active: boolean; cron_active: boolean; platform: string }>("check_day_session");
       setDaySession(res);
     } catch {
       setDaySession(null);
@@ -880,10 +880,10 @@ export default function App() {
                     {blockStatus?.active ? <span className="px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700">⛔ {blockStatus.sites.length} sites blocked now</span> : <span className="px-2 py-1 rounded bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400">No sites blocked now</span>}
                   </div>
                   <div className="mt-5 flex flex-wrap gap-2">
-                    {daySession?.active ? <button onClick={disableDaySession} className="min-h-11 px-4 py-2 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-semibold hover:bg-black">Disable day session</button> : <button onClick={enableDaySession} className="min-h-11 px-4 py-2 rounded-md bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700">Enable day session</button>}
+                    {daySession?.platform !== "macos" && daySession?.platform !== "windows" && (daySession?.active ? <button onClick={disableDaySession} className="min-h-11 px-4 py-2 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-semibold hover:bg-black">Disable day session</button> : <button onClick={enableDaySession} className="min-h-11 px-4 py-2 rounded-md bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700">Enable day session</button>)}
                     <button onClick={() => {refreshBlockStatus(); refreshDaySession(); refreshHostsPreview(); showToast("Settings refreshed");}} className="min-h-11 px-4 py-2 rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-700 text-sm font-semibold hover:bg-zinc-50 dark:bg-zinc-800">Refresh status</button>
                   </div>
-                  <p className="text-xs text-zinc-400 mt-3">Disabled means Focus Block asks for permission at each session start and finish. Enabling requires one system authorization.</p>
+                  <p className="text-xs text-zinc-400 mt-3">{daySession && daySession.platform !== "linux" ? "Linux only — macOS and Windows ask for system permission at each session start and finish." : "Disabled means Focus Block asks for permission at each session start and finish. Enabling requires one system authorization."}</p>
                 </section>
 
                 <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="hosts-heading">
