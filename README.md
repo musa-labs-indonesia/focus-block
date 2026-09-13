@@ -83,6 +83,26 @@ focus-block
 # .desktop: /usr/share/applications/Focus Block.desktop → Exec=focus-block
 ```
 
+## macOS (dmg)
+
+Built only in CI (`.github/workflows/release.yml`, macOS job) — universal binary, Apple Silicon + Intel in one dmg.
+
+```bash
+npx tauri build --target universal-apple-darwin --bundles dmg
+# needs both targets first: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+# output: src-tauri/target/universal-apple-darwin/release/bundle/dmg/FocusBlock_0.1.1_universal.dmg
+```
+
+The dmg is **ad-hoc signed, not notarized** (`bundle.macOS.signingIdentity: "-"` — no Apple Developer account). Gatekeeper will therefore refuse the first launch. Either right-click the app → **Open**, or:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/FocusBlock.app"
+```
+
+Then Settings → Privacy & Security → **Open Anyway** if macOS still blocks it. Money-free fix for a proper signature later: an Apple Developer account + `APPLE_CERTIFICATE`/`APPLE_SIGNING_IDENTITY`/`APPLE_ID` secrets, no code changes needed.
+
+Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is `sudo -n` → `osascript … with administrator privileges`, so expect an admin prompt at each Start **and** Finish. **Day-session (password once per day) is Linux-only** — on macOS the toggle returns `Day-session is Linux only`.
+
 ## Usage
 
 1. **Create task** — `New task` → title, duration (15/25/45/60 shortcuts), per-task domains (e.g. `youtube.com` — validates `a-z0-9.-`, strips `https://`, `www.`, port/path)
