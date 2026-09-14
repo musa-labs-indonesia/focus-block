@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useMemo } from "react";
+import { useEffect, useState, useRef, useMemo, useId } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
@@ -50,6 +50,187 @@ function formatTime(sec: number) {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+/* ── design-system primitives ──────────────────────────────────────────────────────────────────
+ * Small, local, no dependency. They exist so the rules in design.md are enforced by the markup
+ * instead of by remembering them: two button shapes, hairline chips, one dot per status, roman
+ * headings, and no emoji anywhere (emoji render differently on every OS).
+ */
+
+type IconName =
+  | "clock"
+  | "sliders"
+  | "sun"
+  | "moon"
+  | "plus"
+  | "pencil"
+  | "close"
+  | "info"
+  | "alert";
+
+const ICONS: Record<IconName, React.ReactElement> = {
+  clock: (
+    <>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 4.6V8.2l2.4 1.4" />
+    </>
+  ),
+  sliders: (
+    <>
+      <path d="M2 5.5h12M2 10.5h12" />
+      <circle cx="5.5" cy="5.5" r="1.6" />
+      <circle cx="10.5" cy="10.5" r="1.6" />
+    </>
+  ),
+  sun: (
+    <>
+      <circle cx="8" cy="8" r="3" />
+      <path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1" />
+    </>
+  ),
+  moon: <path d="M14 8.5A6 6 0 1 1 7.5 2 4.7 4.7 0 0 0 14 8.5z" />,
+  plus: <path d="M8 3.2v9.6M3.2 8h9.6" />,
+  pencil: <path d="M3 13l.7-3 6.9-6.9 2.3 2.3L6 12.3z" />,
+  close: <path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6" />,
+  info: (
+    <>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 7.4v3.4" />
+      <path d="M8 5.3h.01" />
+    </>
+  ),
+  alert: (
+    <>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 4.9v3.6" />
+      <path d="M8 11.2h.01" />
+    </>
+  ),
+};
+
+function Icon({ name, className = "h-4 w-4" }: { name: IconName; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={`shrink-0 ${className}`}
+    >
+      {ICONS[name]}
+    </svg>
+  );
+}
+
+const BUTTON_BASE =
+  "inline-flex items-center justify-center gap-2 min-h-11 rounded-md px-4 text-sm font-semibold transition-colors duration-150 disabled:opacity-45 disabled:cursor-not-allowed";
+
+const BUTTON_VARIANTS = {
+  primary: "bg-accent text-accent-ink hover:bg-accent-hover",
+  secondary: "border border-rule-2 bg-paper text-ink hover:bg-paper-2",
+  danger: "border border-rule-2 bg-paper text-danger hover:border-danger hover:bg-danger-paper",
+  quiet: "text-ink-2 hover:bg-paper-2 hover:text-ink",
+} as const;
+
+function Button({
+  variant = "secondary",
+  className = "",
+  ...rest
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: keyof typeof BUTTON_VARIANTS }) {
+  return <button type="button" {...rest} className={`${BUTTON_BASE} ${BUTTON_VARIANTS[variant]} ${className}`} />;
+}
+
+function StatusDot({ tone }: { tone: "accent" | "ok" | "muted" | "danger" }) {
+  const fill = { accent: "bg-accent", ok: "bg-ok", danger: "bg-danger", muted: "bg-ink-3/40" }[tone];
+  return <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${fill}`} />;
+}
+
+/** A domain, a count or a state — hairline, never a filled pill. */
+function Chip({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-sm border border-rule bg-paper px-1.5 py-0.5 text-xs text-ink-2 ${className}`}>
+      {children}
+    </span>
+  );
+}
+
+/** The mechanism goes here, not in the main flow: a small icon that explains on click or focus. */
+function Info({ label, children }: { label: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  return (
+    <span className="relative inline-flex align-middle">
+      <button
+        type="button"
+        aria-label={`About ${label}`}
+        aria-expanded={open}
+        aria-describedby={open ? id : undefined}
+        onClick={() => setOpen((v) => !v)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            setOpen(false);
+            e.currentTarget.blur();
+          }
+        }}
+        className="grid h-6 w-6 place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-ink"
+      >
+        <Icon name="info" className="h-3.5 w-3.5" />
+      </button>
+      {open && (
+        <span
+          id={id}
+          role="tooltip"
+          className="absolute left-0 top-8 z-40 w-[min(20rem,80vw)] rounded-md border border-rule bg-paper p-3 text-xs font-normal leading-relaxed text-ink-2 shadow-lg"
+        >
+          {children}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** A hairline rule with a small caps label — the only section divider in the app. */
+function SectionLabel({ children, id }: { children: React.ReactNode; id?: string }) {
+  return (
+    <h3 id={id} className="border-b border-rule pb-2 text-xs font-semibold uppercase tracking-[0.14em] text-ink-3">
+      {children}
+    </h3>
+  );
+}
+
+function NavTab({
+  current,
+  onClick,
+  icon,
+  badge,
+  children,
+}: {
+  current: boolean;
+  onClick: () => void;
+  icon: IconName;
+  badge?: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={current ? "page" : undefined}
+      className={`relative inline-flex min-h-11 items-center gap-2 px-2.5 text-sm font-medium transition-colors duration-150 ${
+        current ? "text-ink" : "text-ink-2 hover:text-ink"
+      }`}
+    >
+      <Icon name={icon} />
+      {children}
+      {badge ? <span className="tabular rounded-sm bg-paper-3 px-1.5 text-[11px] font-semibold text-ink-2">{badge}</span> : null}
+      <span aria-hidden="true" className={`absolute inset-x-2 bottom-0 h-px ${current ? "bg-accent" : "bg-transparent"}`} />
+    </button>
+  );
 }
 
 // Main Component
@@ -382,7 +563,7 @@ export default function App() {
               showToast(
                 res.blocked === 0
                   ? "Leftover block from a previous session cleared"
-                  : `Scheduled block active: ${res.blocked} site(s)`,
+                  : `A scheduled window is still holding ${res.blocked} ${res.blocked === 1 ? "site" : "sites"}`,
               );
             }
           } catch (e: any) {
@@ -488,7 +669,7 @@ export default function App() {
             setToast(
               res.blocked === 0
                 ? `✓ "${activeTodo?.title || "Task"}" is complete. Blocks cleared.`
-                : `✓ "${activeTodo?.title || "Task"}" is complete. ${res.blocked} site(s) still blocked by a scheduled window.`,
+                : `✓ "${activeTodo?.title || "Task"}" is complete. ${res.blocked} ${res.blocked === 1 ? "site" : "sites"} still blocked by a scheduled window.`,
             );
           })
           .catch((e) => setToast(`Session ended, but blocks were not cleared: ${String(e).slice(0, 120)}`));
@@ -721,8 +902,8 @@ export default function App() {
       return;
     }
     if (!confirm("Delete this task?")) return;
+    // no toast: the row disappearing is the feedback. Success stays quiet, refusals speak up.
     setTodos((p) => p.filter((t) => t.id !== id));
-    showToast("Task deleted");
   }
 
   async function startTodo(todo: Todo) {
@@ -772,404 +953,487 @@ export default function App() {
 
   const totalMinutes = todos.reduce((a, b) => a + b.durationMinutes, 0);
   const progress = active ? ((active.durationSeconds - remaining) / active.durationSeconds) * 100 : 0;
+  // what a running session is actually holding shut, for the instrument's domain list
+  const runningSites = active && activeTodo ? Array.from(new Set([...globalBlocks, ...activeTodo.blockedSites])) : [];
 
   return (
     <div className="min-h-screen bg-[#fafaf9] dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 selection:bg-violet-200">
       <a href="#main-content" className="skip-link">Skip to main content</a>
       <div ref={appContentRef}>
         <div role="status" className="sr-only" aria-live="polite">{toast ?? ""}</div>
-        {/* Header */}
-        <header className="sticky top-0 z-30 bg-white dark:bg-zinc-900 dark:bg-zinc-700 border-b border-zinc-200 dark:border-zinc-700 dark:border-zinc-800">
-          <div className="max-w-[1100px] mx-auto px-4 sm:px-6 h-[64px] flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-md bg-zinc-900 dark:bg-zinc-800 flex items-center justify-center text-white">
-                <img src="/logo.svg" alt="Focus Block" className="w-6 h-6 brightness-0 invert" />
-              </div>
-              <div>
-                <h1 className="font-extrabold tracking-tight leading-none text-[17px]">Focus Block</h1>
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 font-medium -mt-0.5">Focused work, fewer distractions</p>
-              </div>
+        {/* Shell */}
+        <header className="sticky top-0 z-30 border-b border-rule bg-paper/95 backdrop-blur">
+          <div className="mx-auto flex h-14 max-w-[1100px] items-center gap-6 px-6">
+            <div className="flex items-center gap-2.5">
+              <img src="/logo.svg" alt="" className="h-6 w-6" />
+              <h1 className="font-display text-base font-semibold tracking-tight">Focus Block</h1>
             </div>
-            <nav className="hidden md:flex items-center gap-1 p-1 rounded-md bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700" aria-label="Primary">
-              <button
-                onClick={() => setPage("focus")}
-                aria-current={page === "focus" ? "page" : undefined}
-                className={`min-h-11 px-3.5 rounded-md text-xs font-bold transition ${page === "focus" ? "bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100" : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"}`}
-              >
-                ◷ Focus
-              </button>
-              <button
-                onClick={() => setPage("settings")}
-                aria-current={page === "settings" ? "page" : undefined}
-                className={`min-h-11 px-3.5 rounded-md text-xs font-bold transition ${page === "settings" ? "bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100" : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"}`}
-              >
-                ⚙ Settings {globalBlocks.length > 0 && <span className="ml-1 px-1.5 py-0.5 rounded bg-red-500 text-white text-[10px]">{globalBlocks.length}</span>}
-              </button>
+            <nav className="flex items-center gap-1" aria-label="Primary">
+              <NavTab current={page === "focus"} onClick={() => setPage("focus")} icon="clock">
+                Focus
+              </NavTab>
+              <NavTab current={page === "settings"} onClick={() => setPage("settings")} icon="sliders" badge={globalBlocks.length}>
+                Settings
+              </NavTab>
             </nav>
-            <div className="flex items-center gap-2 sm:gap-3">
-              <div className="hidden sm:flex items-center gap-2 text-xs">
-                <span className="px-2.5 py-1 rounded bg-zinc-900 dark:bg-zinc-700 text-white font-semibold dark:bg-zinc-800 dark:text-zinc-100 border border-transparent dark:border-zinc-700">{todos.length} tasks</span>
-                <span className="px-2.5 py-1 rounded bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 font-medium dark:text-zinc-300">{totalMinutes} min total</span>
-                {blockStatus?.active && (
-                  <span className="px-2.5 py-1 rounded bg-red-500 text-white font-semibold animate-pulse">⛔ {blockStatus.sites.length} sites blocked</span>
-                )}
-              </div>
-              <button onClick={() => setDark((v) => !v)} aria-label={dark ? "Switch to light mode" : "Switch to dark mode"} title={dark ? "Light mode" : "Dark mode"} className="min-h-11 w-11 grid place-items-center rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-700 transition">{dark ? "☀" : "🌙"}</button>
+            <div className="ml-auto flex items-center gap-2">
+              {blockStatus && (
+                <span className="mr-2 hidden items-center gap-2 text-xs text-ink-2 lg:flex">
+                  <StatusDot tone={blockStatus.active ? "accent" : "muted"} />
+                  {blockStatus.active ? `${blockStatus.sites.length} site${blockStatus.sites.length === 1 ? "" : "s"} blocked` : "Nothing blocked"}
+                </span>
+              )}
               <button
-                onClick={openAdd}
-                disabled={!!active}
-                className="inline-flex items-center gap-1.5 min-h-11 px-3.5 rounded-md bg-violet-600 hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold transition"
+                type="button"
+                onClick={() => setDark((v) => !v)}
+                aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
+                title={dark ? "Light mode" : "Dark mode"}
+                className="grid h-11 w-11 place-items-center rounded-md text-ink-2 transition-colors duration-150 hover:bg-paper-2 hover:text-ink"
               >
-                <span aria-hidden="true" className="text-base leading-none">＋</span> New task
+                <Icon name={dark ? "sun" : "moon"} />
               </button>
+              <Button variant="primary" onClick={openAdd} disabled={!!active}>
+                <Icon name="plus" /> New task
+              </Button>
             </div>
           </div>
         </header>
-        <div className="md:hidden flex justify-center py-3">
-          <nav className="flex items-center gap-1 p-1 rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-700" aria-label="Primary">
-            <button onClick={() => setPage("focus")} aria-current={page === "focus" ? "page" : undefined} className={`min-h-11 px-4 rounded-md text-xs font-bold ${page === "focus" ? "bg-zinc-900 dark:bg-zinc-700 text-white" : "text-zinc-500 dark:text-zinc-400"}`}>◷ Focus</button>
-            <button onClick={() => setPage("settings")} aria-current={page === "settings" ? "page" : undefined} className={`min-h-11 px-4 rounded-md text-xs font-bold ${page === "settings" ? "bg-zinc-900 dark:bg-zinc-700 text-white" : "text-zinc-500 dark:text-zinc-400"}`}>⚙ Settings</button>
-          </nav>
-        </div>
 
-      <main id="main-content" className="max-w-[1100px] mx-auto px-4 sm:px-6 py-8 space-y-8">
-        <div className="flex items-end justify-between border-b border-zinc-300 dark:border-zinc-700 pb-4">
+      <main id="main-content" className="mx-auto max-w-[1100px] px-6 pb-16 pt-8">
+        <div className="flex flex-wrap items-end justify-between gap-4 border-b border-rule pb-4">
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.18em] text-violet-700">{page === "focus" ? "Work queue" : "Configuration"}</p>
-            <h2 ref={pageHeadingRef} tabIndex={-1} className="mt-1 text-2xl font-extrabold tracking-tight">{page === "focus" ? "Focus tasks" : "Settings"}</h2>
+            <h2 ref={pageHeadingRef} tabIndex={-1} className="text-2xl font-semibold">
+              {page === "focus" ? "Focus" : "Settings"}
+            </h2>
+            <p className="mt-1 text-sm text-ink-2">
+              {page === "focus"
+                ? "Pick one task. The timer cannot be paused or stopped."
+                : "What gets blocked, when, and whether Focus Block can act without a password."}
+            </p>
           </div>
-          <p className="hidden sm:block text-sm text-zinc-500 dark:text-zinc-400">{page === "focus" ? "Choose one task and start a focused session." : "Control how Focus Block blocks distracting sites."}</p>
+          {page === "focus" && (
+            <p className="flex items-center gap-3 text-xs text-ink-2">
+              <span className="tabular">
+                {todos.length} {todos.length === 1 ? "task" : "tasks"}
+              </span>
+              <span aria-hidden="true" className="h-3 w-px bg-rule-2" />
+              <span className="tabular">{totalMinutes} min</span>
+            </p>
+          )}
         </div>
-        {/* Active Session */}
+        {/* The instrument: expanded while a session runs, one quiet line when idle */}
         {active && activeTodo ? (
-          <section className="relative overflow-hidden rounded-md bg-zinc-900 dark:bg-zinc-700 text-white p-6 sm:p-8" aria-labelledby="active-session-heading">
-            <div className="absolute inset-0 bg-gradient-to-br from-violet-600/30 via-transparent to-fuchsia-500/20 pointer-events-none" />
-            <div className="relative flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-              <div className="space-y-3 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-white dark:bg-zinc-900 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 text-xs font-bold">
-                    <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> ACTIVE SESSION
-                  </span>
-                  <span className="text-xs text-zinc-400">Controls are locked until the timer ends.</span>
-                </div>
-                <h3 id="active-session-heading" className="text-2xl sm:text-3xl font-extrabold tracking-tight leading-tight truncate">{activeTodo.title}</h3>
-                <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-300">
-                  <span className="px-2.5 py-1 rounded bg-white dark:bg-zinc-900 dark:bg-zinc-700/10 border border-white/10">{activeTodo.durationMinutes} minute session</span>
-                  {[...globalBlocks, ...activeTodo.blockedSites].length > 0 && (
-                    <span className="px-2.5 py-1 rounded bg-red-500/20 border border-red-500/30 text-red-200">
-                      ⛔ Blocking {Array.from(new Set([...globalBlocks, ...activeTodo.blockedSites])).join(", ")}
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-zinc-400 max-w-[60ch]">
-                  Blocking is active across browsers through <code className="px-1 py-0.5 rounded bg-white dark:bg-zinc-900 dark:bg-zinc-700/10">/etc/hosts</code>. It will clear when the session ends.
+          <section
+            className="mt-6 overflow-hidden rounded-md border border-l-2 border-rule border-l-accent bg-paper-2"
+            aria-labelledby="active-session-heading"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-6 p-6">
+              <div className="min-w-0 space-y-3">
+                <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-ink-2">
+                  <StatusDot tone="accent" /> Running
                 </p>
+                <h3 id="active-session-heading" className="truncate text-xl font-semibold">
+                  {activeTodo.title}
+                </h3>
+                <p className="text-sm text-ink-2">
+                  {activeTodo.durationMinutes} minute session · ends at{" "}
+                  {new Date(active.endAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · no pause, no stop
+                </p>
+                {runningSites.length > 0 ? (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs text-ink-3">Blocked in every browser:</span>
+                    {runningSites.map((s) => (
+                      <Chip key={s}>{s}</Chip>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-ink-3">This task has no domains of its own, so nothing is blocked while it runs.</p>
+                )}
               </div>
-              <div className="flex flex-col items-center lg:items-end gap-3">
-                <div className="text-[56px] sm:text-[72px] font-black tracking-tighter tabular-nums leading-none" role="timer" aria-label={`${formatTime(remaining)} remaining`} aria-live="off">
+              <div className="flex flex-col items-end gap-1">
+                <div
+                  className="timer-digits text-timer leading-none"
+                  role="timer"
+                  aria-label={`${formatTime(remaining)} remaining`}
+                  aria-live="off"
+                >
                   {formatTime(remaining)}
                 </div>
-                <div className="text-xs font-semibold tracking-widest text-zinc-400">REMAINING</div>
-                <div className="w-full lg:w-[320px] h-2 rounded-full bg-white dark:bg-zinc-900 dark:bg-zinc-700/10 overflow-hidden" role="progressbar" aria-label="Focus session progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)}>
-                  <div
-                    className="h-full bg-white dark:bg-zinc-900 dark:bg-zinc-700 transition-all duration-1000 ease-linear"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-                <div className="text-[11px] text-zinc-500 dark:text-zinc-400 font-medium">Started {new Date(active.startAt).toLocaleTimeString()} · ends {new Date(active.endAt).toLocaleTimeString()}</div>
+                <p className="text-xs uppercase tracking-[0.14em] text-ink-3">remaining</p>
               </div>
             </div>
-            {/* subtle grid */}
-            <div className="absolute inset-0 pointer-events-none opacity-[0.04]" style={{ backgroundImage: `linear-gradient(white 1px, transparent 1px), linear-gradient(90deg, white 1px, transparent 1px)`, backgroundSize: `24px 24px` }} />
+            <div
+              className="h-0.5 w-full bg-rule"
+              role="progressbar"
+              aria-label="Focus session progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(progress)}
+            >
+              <div className="h-full bg-accent transition-[width] duration-1000 ease-linear" style={{ width: `${progress}%` }} />
+            </div>
           </section>
         ) : (
-          <section className="border-y border-zinc-200 dark:border-zinc-700 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3" aria-label="Session status">
-            <div className="flex items-center gap-3">
-              <span className="w-8 h-8 rounded-md bg-violet-50 border border-violet-200 flex items-center justify-center text-violet-600" aria-hidden="true">◷</span>
-              <div>
-                <p className="font-semibold text-sm">No active session</p>
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">Choose a task to start a session. The timer runs until it ends.</p>
-              </div>
-            </div>
-            <div className="text-xs text-zinc-500 dark:text-zinc-400 flex items-center gap-2">
-              {blockStatus?.active ? (
-                <span className="px-2 py-1 rounded bg-amber-50 border border-amber-200 text-amber-700">⚠ Sites remain blocked and will clear on the next start or finish.</span>
-              ) : (
-                <span className="px-2 py-1 rounded bg-emerald-50 border border-emerald-200 text-emerald-700">✓ No sites are blocked.</span>
-              )}
-            </div>
+          <section
+            className={`mt-6 flex flex-wrap items-center justify-between gap-3 border-b border-rule pb-3 ${page === "settings" ? "max-w-[68ch]" : ""}`}
+            aria-label="Session status"
+          >
+            <p className="flex items-center gap-2 text-sm text-ink-2">
+              <StatusDot tone={blockStatus?.active ? "accent" : "muted"} />
+              {blockStatus?.active
+                ? `${blockStatus.sites.length} ${blockStatus.sites.length === 1 ? "site" : "sites"} blocked right now`
+                : "Nothing is blocked right now"}
+            </p>
+            <p className="text-xs text-ink-3">
+              {blockStatus?.active ? "Clears when the window ends." : "Start a task to block its domains."}
+            </p>
           </section>
         )}
 
         {page === "focus" ? (
           <>
-            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 border-b border-zinc-200 dark:border-zinc-700 pb-4">
-              <div className="relative flex-1 w-full max-w-xl">
-                <label htmlFor="task-search" className="block text-xs font-bold uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400 mb-2">Find a task</label>
+            {/* Search */}
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
+              <label className="relative w-full max-w-sm">
+                <span className="sr-only">Find a task</span>
                 <input
                   id="task-search"
                   type="search"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search by task name"
-                  className="w-full pl-3 pr-3 py-2.5 rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-700 text-sm outline-none focus:border-violet-500 focus:bg-white placeholder:text-zinc-400"
+                  placeholder="Find a task"
+                  className="w-full rounded-md border border-rule-2 bg-paper px-3 py-2.5 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-ink-3 focus:border-accent"
                 />
-              </div>
-              <div className="flex items-center gap-2 text-xs shrink-0" aria-label={`${todos.length} tasks, ${totalMinutes} minutes total`}>
-                <span className="px-2.5 py-1 rounded bg-zinc-900 dark:bg-zinc-700 text-white font-semibold">{todos.length} tasks</span>
-                <span className="px-2.5 py-1 rounded bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 font-medium">{totalMinutes} min total</span>
-                {globalBlocks.length > 0 && <span className="px-2.5 py-1 rounded bg-red-50 border border-red-200 text-red-700 font-medium">🌐 {globalBlocks.length} global</span>}
-                {blockStatus?.active && <span className="px-2.5 py-1 rounded bg-red-500 text-white font-semibold animate-pulse">⛔ {blockStatus.sites.length} blocked</span>}
-              </div>
+              </label>
+              <p className="flex items-center gap-3 text-xs text-ink-3">
+                {globalBlocks.length > 0 && (
+                  <>
+                    <span className="tabular">{globalBlocks.length} global</span>
+                    <span aria-hidden="true" className="h-3 w-px bg-rule-2" />
+                  </>
+                )}
+                <span>{blockStatus?.active ? `${blockStatus.sites.length} blocked now` : "idle"}</span>
+              </p>
             </div>
 
-            {/* Todo grid */}
+            {/* Ledger — one row per task, hairlines between, no card chrome */}
             {filteredTodos.length === 0 ? (
-              <div className="border-y border-zinc-200 dark:border-zinc-700 py-16 text-center">
-                <div className="w-12 h-12 mx-auto rounded-md bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 grid place-items-center text-xl mb-3">📋</div>
-                <h3 className="font-bold">{todos.length === 0 ? "No tasks yet" : "No matches"}</h3>
-                <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1 max-w-[40ch] mx-auto">
-                  {todos.length === 0 ? "Create a task with a duration and optional blocked domains." : `No tasks match "${query}". Try a different name.`}
+              <div className="mt-8 border-y border-rule py-16 text-center">
+                <h3 className="text-lg font-semibold">{todos.length === 0 ? "No tasks yet" : "No matches"}</h3>
+                <p className="mx-auto mt-1 max-w-[46ch] text-sm text-ink-2">
+                  {todos.length === 0
+                    ? "A task is a length of time plus the sites to shut while it runs."
+                    : `Nothing matches \u201c${query}\u201d.`}
                 </p>
                 {todos.length === 0 && (
-                  <button onClick={openAdd} className="mt-4 min-h-11 px-4 py-2 rounded-md bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700">
-                    ＋ Create task
-                  </button>
+                  <Button variant="primary" className="mt-5" onClick={openAdd}>
+                    <Icon name="plus" /> New task
+                  </Button>
                 )}
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {filteredTodos.map((todo) => {
-                  const isRunning = active?.todoId === todo.id;
-                  const isLocked = !!active;
-                  const isThisLocked = isRunning || isLocked;
-                  const mergedCount = new Set([...globalBlocks, ...todo.blockedSites]).size;
-                  return (
-                    <div
-                      key={todo.id}
-                      className={`group relative rounded-md border bg-white dark:bg-zinc-900 dark:bg-zinc-700 p-4 flex flex-col gap-3 transition ${isRunning ? "border-violet-300 ring-2 ring-violet-200 bg-violet-50/50 dark:bg-violet-950/30" : "border-zinc-200 dark:border-zinc-700"}`}
-                    >
-                      {isRunning && (
-                        <div className="absolute -top-2 end-3 px-2.5 py-1 rounded bg-violet-600 text-white text-[11px] font-bold flex items-center gap-1">
-                          <span className="w-1.5 h-1.5 rounded-full bg-white dark:bg-zinc-900 dark:bg-zinc-700 animate-pulse" /> RUNNING
+              <>
+                <div className="mt-8 hidden items-center gap-4 border-b border-rule pb-2 text-xs font-semibold uppercase tracking-[0.14em] text-ink-3 sm:flex">
+                  <span className="flex-1">Task</span>
+                  <span className="w-16 text-right">Length</span>
+                  <span className="w-[38%]">Domains</span>
+                  <span className="w-[136px] text-right">Actions</span>
+                </div>
+                <ul className="divide-y divide-rule">
+                  {filteredTodos.map((todo) => {
+                    const isRunning = active?.todoId === todo.id;
+                    const isLocked = !!active;
+                    const isThisLocked = isRunning || isLocked;
+                    const mergedCount = new Set([...globalBlocks, ...todo.blockedSites]).size;
+                    return (
+                      <li
+                        key={todo.id}
+                        className={`flex flex-wrap items-center gap-x-4 gap-y-2 py-3 ${isRunning ? "bg-accent-paper/50" : ""}`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="flex items-center gap-2 truncate font-medium text-ink">
+                            {isRunning && <StatusDot tone="accent" />}
+                            {todo.title}
+                          </p>
+                          <p className="mt-0.5 text-xs text-ink-3">
+                            {mergedCount > 0
+                              ? `${mergedCount} ${mergedCount === 1 ? "site" : "sites"} blocked`
+                              : "nothing blocked"}
+                            {isRunning && " · running now"}
+                          </p>
                         </div>
-                      )}
-                      <div className="flex items-start justify-between gap-2 pr-6">
-                        <h4 className="font-bold leading-tight line-clamp-2 flex-1">{todo.title}</h4>
-                        <span className="shrink-0 px-2.5 py-1 rounded bg-zinc-900 dark:bg-zinc-700 text-white text-xs font-bold tabular-nums">
-                          {todo.durationMinutes} min
-                        </span>
-                      </div>
-                      {isRunning ? (
-                        <div className="rounded-md bg-zinc-900 dark:bg-zinc-700 text-white p-3 flex items-center justify-between">
-                          <span className="text-xs font-semibold tracking-widest text-zinc-400">TIME REMAINING</span>
-                          <span className="text-xl font-black tabular-nums">{formatTime(remaining)}</span>
+                        <span className="tabular w-16 text-right text-sm text-ink-2">{todo.durationMinutes}m</span>
+                        <div className="flex w-[38%] min-w-0 flex-wrap items-center gap-1">
+                          {todo.blockedSites.slice(0, 3).map((s) => (
+                            <Chip key={s}>{s}</Chip>
+                          ))}
+                          {todo.blockedSites.length > 3 && <span className="text-xs text-ink-3">+{todo.blockedSites.length - 3}</span>}
+                          {todo.blockedSites.length === 0 && (
+                            <span className="text-xs text-ink-3">{globalBlocks.length > 0 ? "your global list only" : "\u2014"}</span>
+                          )}
                         </div>
-                      ) : (
-                        <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-                          <span className="px-2 py-1 rounded bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">◷ {todo.durationMinutes} minute session</span>
-                          {mergedCount > 0 && <span className="px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700">⛔ {mergedCount} blocked site(s)</span>}
+                        <div className="flex w-[136px] items-center justify-end gap-1">
+                          <Button
+                            variant={isRunning ? "secondary" : "primary"}
+                            onClick={() => startTodo(todo)}
+                            disabled={!!active}
+                            className="min-w-[92px] px-3"
+                          >
+                            {isRunning ? "Running" : "Start"}
+                          </Button>
+                          <button
+                            type="button"
+                            onClick={() => openEdit(todo)}
+                            disabled={isThisLocked}
+                            aria-label={`Edit ${todo.title}`}
+                            title={isThisLocked ? "Locked while a session runs" : "Edit"}
+                            className="grid h-11 w-11 place-items-center rounded-md text-ink-3 transition-colors duration-150 hover:bg-paper-2 hover:text-ink disabled:opacity-45 disabled:cursor-not-allowed"
+                          >
+                            <Icon name="pencil" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteTodo(todo.id)}
+                            disabled={isThisLocked}
+                            aria-label={`Delete ${todo.title}`}
+                            title={isThisLocked ? "Locked while a session runs" : "Delete"}
+                            className="grid h-11 w-11 place-items-center rounded-md text-ink-3 transition-colors duration-150 hover:bg-danger-paper hover:text-danger disabled:opacity-45 disabled:cursor-not-allowed"
+                          >
+                            <Icon name="close" />
+                          </button>
                         </div>
-                      )}
-                      <div className="flex flex-wrap gap-1 min-h-[24px]">
-                        {todo.blockedSites.length === 0 ? (
-                          <span className="text-xs text-zinc-400 italic">No task-specific domains</span>
-                        ) : (
-                          todo.blockedSites.map((s) => (
-                            <span key={s} className="px-2 py-1 rounded bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
-                              {s}
-                            </span>
-                          ))
-                        )}
-                        {globalBlocks.length > 0 && (
-                          <span className="px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700 text-xs">+ {globalBlocks.length} global</span>
-                        )}
-                      </div>
-                      {isRunning && (
-                        <div className="h-1.5 rounded-full bg-zinc-200 overflow-hidden">
-                          <div className="h-full bg-violet-600 transition-all duration-1000" style={{ width: `${progress}%` }} />
-                        </div>
-                      )}
-                      <div className="flex gap-2 mt-auto pt-1">
-                        <button
-                          onClick={() => startTodo(todo)}
-                          disabled={!!active}
-                          className={`flex-1 inline-flex items-center justify-center gap-1.5 min-h-11 py-2 rounded-md text-sm font-bold transition ${isRunning ? "bg-zinc-900 dark:bg-zinc-700 text-white opacity-60 cursor-not-allowed" : active ? "bg-zinc-100 text-zinc-400 border border-zinc-200 dark:border-zinc-700 cursor-not-allowed" : "bg-violet-600 hover:bg-violet-700 text-white"}`}
-                        >
-                          {isRunning ? "● Focusing…" : "▶ Start"}
-                        </button>
-                        <button onClick={() => openEdit(todo)} disabled={isThisLocked} aria-label={`Edit ${todo.title}`} title={isThisLocked ? "Locked while session runs" : "Edit task"} className="min-w-11 min-h-11 px-3 py-2 rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-700 text-sm font-semibold hover:bg-zinc-50 dark:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed">✎</button>
-                        <button onClick={() => deleteTodo(todo.id)} disabled={isThisLocked} aria-label={`Delete ${todo.title}`} title={isThisLocked ? "Locked while session runs" : "Delete task"} className="min-w-11 min-h-11 px-3 py-2 rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-700 text-sm hover:bg-red-50 hover:border-red-200 hover:text-red-600 disabled:opacity-40 disabled:cursor-not-allowed">✕</button>
-                      </div>
-                      {isRunning && <p className="text-[11px] text-center text-violet-700 font-medium">The timer cannot be paused, stopped, or edited.</p>}
-                    </div>
-                  );
-                })}
-              </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
             )}
           </>
         ) : (
           <>
-            <div className="space-y-8">
-              <section className="border-y border-zinc-200 dark:border-zinc-700 py-6" aria-labelledby="global-blocks-heading">
-                <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-                  <div className="max-w-[62ch]">
-                    <div className="flex items-center gap-3">
-                      <h3 id="global-blocks-heading" className="font-bold text-base">Global blocks</h3>
-                      <span className="px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-[11px] font-semibold">{globalBlocks.length}</span>
-                    </div>
-                    <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">These domains are blocked in every focus session. Task-specific domains are added when you create a task.</p>
+            <div className="mt-8 max-w-[68ch] space-y-10">
+              <section className="space-y-4" aria-labelledby="global-blocks-heading">
+                <SectionLabel id="global-blocks-heading">Blocking</SectionLabel>
+                <p className="text-sm text-ink-2">
+                  These sites are shut in every session. A task can add its own list on top of this one.
+                </p>
+                <div className="flex flex-wrap items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <label htmlFor="global-site" className="sr-only">Site to block everywhere</label>
+                    <input id="global-site" name="global-site" type="text" autoComplete="off" value={globalInput} onChange={(e) => { setGlobalInput(e.target.value); setGlobalError(null); }} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addGlobalSite())} placeholder="youtube.com" disabled={!!active} aria-invalid={globalError ? "true" : undefined} aria-describedby={globalError ? "global-site-error" : undefined} className="w-full rounded-md border border-rule-2 bg-paper px-3 py-2.5 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-ink-3 focus:border-accent disabled:opacity-45" />
+                    {globalError && <p id="global-site-error" role="alert" className="mt-1.5 text-xs text-danger">{globalError}</p>}
                   </div>
-                  {active && <span className="self-start text-xs px-2 py-1 rounded bg-amber-50 border border-amber-200 text-amber-700 font-medium">Locked during a session</span>}
+                  <Button variant="secondary" onClick={addGlobalSite} disabled={!!active}>Add</Button>
                 </div>
-                <div className="mt-5 flex flex-col sm:flex-row gap-2 max-w-2xl">
-                  <div className="flex-1">
-                    <label htmlFor="global-site" className="sr-only">Global blocked domain</label>
-                    <input id="global-site" name="global-site" type="text" autoComplete="off" value={globalInput} onChange={(e) => { setGlobalInput(e.target.value); setGlobalError(null); }} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addGlobalSite())} placeholder="youtube.com" disabled={!!active} aria-invalid={globalError ? "true" : undefined} aria-describedby={globalError ? "global-site-error" : undefined} className="w-full px-3.5 py-2.5 rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-700 text-sm outline-none focus:border-violet-500 disabled:opacity-50 placeholder:text-zinc-400" />
-                    {globalError && <p id="global-site-error" className="mt-1 text-xs text-red-700">{globalError}</p>}
-                  </div>
-                  <button onClick={addGlobalSite} disabled={!!active} className="min-h-11 px-4 py-2.5 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-semibold hover:bg-black disabled:opacity-40">Add domain</button>
+                {active && <p className="text-xs text-ink-3">Locked while a session runs.</p>}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {globalBlocks.length === 0 ? (
+                    <span className="text-sm text-ink-3">Nothing is blocked everywhere yet.</span>
+                  ) : (
+                    globalBlocks.map((s) => (
+                      <Chip key={s}>
+                        {s}
+                        <button
+                          type="button"
+                          onClick={() => removeGlobalSite(s)}
+                          disabled={!!active}
+                          aria-label={`Remove ${s} from the global list`}
+                          className="compact-hit grid place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-danger disabled:opacity-45"
+                        >
+                          <Icon name="close" className="h-3 w-3" />
+                        </button>
+                      </Chip>
+                    ))
+                  )}
                 </div>
-                <div className="flex flex-wrap gap-1.5 mt-4 min-h-[28px]">
-                  {globalBlocks.length === 0 ? <span className="text-xs text-zinc-400 italic">No global domains yet. Add one to block it across all sessions.</span> : globalBlocks.map((s) => (
-                    <span key={s} className="inline-flex items-center gap-1.5 pl-2.5 pr-1 py-1 rounded bg-red-50 border border-red-200 text-red-700 text-xs font-medium">{s}<button onClick={() => removeGlobalSite(s)} disabled={!!active} aria-label={`Remove ${s} from global blocks`} className="compact-hit grid place-items-center rounded bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-red-200 hover:bg-red-50 disabled:opacity-40">×</button></span>
-                  ))}
-                </div>
-                <p className="mt-4 border-l-2 border-amber-300 pl-3 text-xs text-amber-800">Global and task-specific domains are combined when a session starts. Blocks are applied through <code className="px-1 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">/etc/hosts</code>.</p>
               </section>
 
-              <div className="grid gap-x-8 gap-y-8 lg:grid-cols-2">
-                <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="saved-auth-heading">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <h3 id="saved-auth-heading" className="font-bold text-base">Saved authorization</h3>
-                      <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Authorize once and Focus Block stops asking for a password — no daily reset.</p>
-                    </div>
-                    <span className={`shrink-0 px-2.5 py-1 rounded text-xs font-bold border ${savedAuth?.enabled ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-zinc-100 border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400"}`}>{savedAuth?.enabled ? "Enabled" : "Disabled"}</span>
+              <div className="space-y-10">
+                <section className="space-y-4" aria-labelledby="saved-auth-heading">
+                  <SectionLabel id="saved-auth-heading">Authorization</SectionLabel>
+                  <p className="flex flex-wrap items-center gap-2 text-sm text-ink-2">
+                    <StatusDot tone={savedAuth?.enabled ? "ok" : "muted"} />
+                    {savedAuth?.enabled
+                      ? "Focus Block can change blocking without asking for a password."
+                      : savedAuth?.platform === "linux"
+                        ? "Focus Block will ask for your password when a block starts and stops."
+                        : savedAuth
+                          ? "Focus Block will ask for permission when a block starts and stops."
+                          : "Checking…"}
+                    <Info label="authorization">
+                      Enabling installs a small program at <code>/usr/local/bin/focusblock-apply</code> and a rule at{" "}
+                      <code>/etc/sudoers.d/focusblock</code> that lets it run as the system administrator. The rule
+                      allows exactly two things: block a list of sites, or clear them. Disabling removes both files.
+                    </Info>
+                  </p>
+                  {savedAuth?.helper_version === 1 && (
+                    <p className="border-l-2 border-warn pl-3 text-sm text-warn">
+                      An older version of Focus Block installed this. Press Enable to replace it — one password.
+                    </p>
+                  )}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {savedAuth?.platform === "linux" &&
+                      (savedAuth?.enabled ? (
+                        <Button variant="secondary" onClick={disableSavedAuth}>Disable</Button>
+                      ) : (
+                        <Button variant="primary" onClick={enableSavedAuth}>Enable</Button>
+                      ))}
+                    <Button
+                      variant="quiet"
+                      onClick={() => {
+                        refreshBlockStatus();
+                        refreshSavedAuth();
+                        refreshHostsPreview();
+                      }}
+                    >
+                      Refresh
+                    </Button>
                   </div>
-                  <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
-                    {blockStatus?.active ? <span className="px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700">⛔ {blockStatus.sites.length} sites blocked now</span> : <span className="px-2 py-1 rounded bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400">No sites blocked now</span>}
-                  </div>
-                  <div className="mt-5 flex flex-wrap gap-2">
-                    {savedAuth?.platform === "linux" && (savedAuth?.enabled ? <button onClick={disableSavedAuth} className="min-h-11 px-4 py-2 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-semibold hover:bg-black">Disable saved authorization</button> : <button onClick={enableSavedAuth} className="min-h-11 px-4 py-2 rounded-md bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700">Enable saved authorization</button>)}
-                    <button onClick={() => {refreshBlockStatus(); refreshSavedAuth(); refreshHostsPreview(); showToast("Settings refreshed");}} className="min-h-11 px-4 py-2 rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-700 text-sm font-semibold hover:bg-zinc-50 dark:bg-zinc-800">Refresh status</button>
-                  </div>
-                  <p className="text-xs text-zinc-400 mt-3">{savedAuth?.platform === "linux" ? "Disabled means Focus Block asks for permission at each session start and finish. Enabling requires one system authorization, then never again until you disable it." : savedAuth ? "Linux only — macOS and Windows ask for system permission at each session start and finish." : ""}</p>
-                  {savedAuth?.helper_version === 1 && <p className="mt-3 border-l-2 border-amber-300 pl-3 text-xs text-amber-800">Installed by an older version and no longer used, so writes ask for a password now. Press Enable to replace it — one password.</p>}
                 </section>
 
-                <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="schedule-heading">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <h3 id="schedule-heading" className="font-bold text-base">Scheduled blocks</h3>
-                      <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Block a set of sites during an hour range, every day. Up to {MAX_SCHEDULES} windows, and they cannot overlap.</p>
-                    </div>
-                    <span className="shrink-0 px-2.5 py-1 rounded text-xs font-bold border border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400">{schedules.length}/{MAX_SCHEDULES}</span>
-                  </div>
-
-                  {scheduleError && <p role="alert" className="mt-3 border-l-2 border-red-300 pl-3 text-xs text-red-700">{scheduleError}</p>}
-
-                  <div className="mt-4 space-y-3">
+                <section className="space-y-4" aria-labelledby="schedule-heading">
+                  <SectionLabel id="schedule-heading">Scheduled blocks</SectionLabel>
+                  <p className="text-sm text-ink-2">
+                    Up to {MAX_SCHEDULES} windows a day. While one is open, its sites and your global list are
+                    blocked. They cannot overlap.
+                  </p>
+                  {scheduleError && <p role="alert" className="border-l-2 border-danger pl-3 text-sm text-danger">{scheduleError}</p>}
+                  <div className="space-y-5">
                     {schedules.map((rule) => {
                       const blockedNow = activeRuleIds.includes(rule.id);
                       return (
-                        <div key={rule.id} className={`rounded-md border p-3 ${blockedNow ? "border-red-200 bg-red-50" : "border-zinc-200 dark:border-zinc-700"}`}>
+                        <div key={rule.id} className={`space-y-3 border-l-2 pl-3 ${blockedNow ? "border-accent" : "border-rule"}`}>
                           <div className="flex flex-wrap items-center gap-2">
                             <label htmlFor={`start-${rule.id}`} className="sr-only">Start hour</label>
-                            <select id={`start-${rule.id}`} value={rule.startHour} onChange={(e) => updateRule(rule.id, { startHour: Number(e.target.value) })} className="min-h-11 px-2.5 rounded-md bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-sm">
+                            <select id={`start-${rule.id}`} value={rule.startHour} onChange={(e) => updateRule(rule.id, { startHour: Number(e.target.value) })} className="tabular rounded-md border border-rule-2 bg-paper px-2 py-2 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent">
                               {START_HOURS.map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
                             </select>
-                            <span className="text-xs text-zinc-500 dark:text-zinc-400">to</span>
+                            <span className="text-sm text-ink-3">to</span>
                             <label htmlFor={`end-${rule.id}`} className="sr-only">End hour</label>
-                            <select id={`end-${rule.id}`} value={rule.endHour} onChange={(e) => updateRule(rule.id, { endHour: Number(e.target.value) })} className="min-h-11 px-2.5 rounded-md bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-sm">
+                            <select id={`end-${rule.id}`} value={rule.endHour} onChange={(e) => updateRule(rule.id, { endHour: Number(e.target.value) })} className="tabular rounded-md border border-rule-2 bg-paper px-2 py-2 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent">
                               {END_HOURS.map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
                             </select>
-                            <span className="text-xs text-zinc-500 dark:text-zinc-400">every day</span>
-                            {blockedNow && <span className="px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700 text-xs font-bold">Blocked now</span>}
-                            <button onClick={() => removeRule(rule.id)} className="ml-auto min-h-11 px-3 rounded-md bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-xs font-semibold">Remove</button>
+                            <span className="text-sm text-ink-3">every day</span>
+                            {blockedNow && (
+                              <span className="flex items-center gap-2 text-xs font-semibold text-accent">
+                                <StatusDot tone="accent" /> blocked now
+                              </span>
+                            )}
+                            <Button variant="quiet" className="ml-auto px-2 text-xs" onClick={() => removeRule(rule.id)}>
+                              Remove
+                            </Button>
                           </div>
-                          <div className="flex gap-2 mt-3">
-                            <label htmlFor={`site-${rule.id}`} className="sr-only">Domain for this rule</label>
-                            <input id={`site-${rule.id}`} type="text" autoComplete="off" value={ruleInputs[rule.id] ?? ""} onChange={(e) => setRuleInputs((p) => ({ ...p, [rule.id]: e.target.value }))} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addRuleSite(rule.id))} placeholder="x.com" className="flex-1 px-3.5 py-2.5 rounded-md bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-sm outline-none focus:border-violet-500 placeholder:text-zinc-400" />
-                            <button onClick={() => addRuleSite(rule.id)} className="min-h-11 px-4 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-semibold">Add domain</button>
+                          <div className="flex flex-wrap items-start gap-2">
+                            <div className="min-w-0 flex-1">
+                              <label htmlFor={`site-${rule.id}`} className="sr-only">Site for this window</label>
+                              <input id={`site-${rule.id}`} type="text" autoComplete="off" value={ruleInputs[rule.id] ?? ""} onChange={(e) => setRuleInputs((p) => ({ ...p, [rule.id]: e.target.value }))} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addRuleSite(rule.id))} placeholder="x.com" className="w-full rounded-md border border-rule-2 bg-paper px-3 py-2.5 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-ink-3 focus:border-accent" />
+                            </div>
+                            <Button variant="secondary" onClick={() => addRuleSite(rule.id)}>Add</Button>
                           </div>
-                          <div className="flex flex-wrap gap-1.5 mt-3 min-h-[24px]">
-                            {rule.sites.length === 0 ? <span className="text-xs text-zinc-400 italic">No extra domains — your global blocks still apply in this window.</span> : rule.sites.map((s) => (
-                              <span key={s} className="inline-flex items-center gap-1.5 pl-2.5 pr-1 py-1 rounded bg-red-50 border border-red-200 text-red-700 text-xs font-medium">{s}<button onClick={() => removeRuleSite(rule.id, s)} aria-label={`Remove ${s} from this rule`} className="compact-hit grid place-items-center rounded bg-white dark:bg-zinc-900 border border-red-200">×</button></span>
-                            ))}
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {rule.sites.length === 0 ? (
+                              <span className="text-xs text-ink-3">No sites of its own — the global list still applies in this window.</span>
+                            ) : (
+                              rule.sites.map((s) => (
+                                <Chip key={s}>
+                                  {s}
+                                  <button
+                                    type="button"
+                                    onClick={() => removeRuleSite(rule.id, s)}
+                                    aria-label={`Remove ${s} from this window`}
+                                    className="compact-hit grid place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-danger"
+                                  >
+                                    <Icon name="close" className="h-3 w-3" />
+                                  </button>
+                                </Chip>
+                              ))
+                            )}
                           </div>
                         </div>
                       );
                     })}
-                    {schedules.length < MAX_SCHEDULES && <button onClick={addRule} className="min-h-11 px-4 py-2 rounded-md bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700">Add rule</button>}
+                    {schedules.length < MAX_SCHEDULES && (
+                      <Button variant="secondary" onClick={addRule}>
+                        <Icon name="plus" /> Add window
+                      </Button>
+                    )}
                   </div>
-
-                  <p className="mt-4 border-l-2 border-amber-300 pl-3 text-xs text-amber-800">A window applies while Focus Block is open — closing the app releases it. Without saved authorization, the start and the end of a window each ask for a password.</p>
+                  <p className="text-xs text-ink-3">
+                    A window applies while Focus Block is open — closing the app releases it.
+                    {savedAuth && !savedAuth.enabled && " Without authorization, opening and closing a window each asks for a password."}
+                  </p>
                 </section>
 
-                <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="hosts-heading">
-                  <div className="flex items-center justify-between gap-3">
-                    <h3 id="hosts-heading" className="font-bold text-base">Hosts diagnostics</h3>
-                    <button onClick={refreshHostsPreview} className="min-h-11 px-3 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-xs font-semibold">Reload preview</button>
-                  </div>
-                  <dl className="grid grid-cols-2 gap-3 mt-4 text-xs">
-                    <div className="rounded-md border border-zinc-200 dark:border-zinc-700 p-3">
-                      <dt className="font-bold text-zinc-700">Blocking status</dt>
-                      <dd className={`mt-1 text-sm font-black ${blockStatus?.active ? "text-red-600" : "text-emerald-600"}`}>{blockStatus?.active ? "Active" : "Inactive"}</dd>
-                      <dd className="text-[11px] text-zinc-500 dark:text-zinc-400">{blockStatus?.sites.length || 0} site(s) {blockStatus?.active ? "blocked" : "configured"}</dd>
+                <section className="space-y-3" aria-labelledby="hosts-heading">
+                  <SectionLabel id="hosts-heading">Technical details</SectionLabel>
+                  <p className="text-sm text-ink-2">
+                    Everything above works through one system file. Nothing here needs your attention unless you are
+                    troubleshooting.
+                  </p>
+                  <details className="mt-1">
+                    <summary className="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-ink-2 transition-colors duration-150 hover:text-ink">
+                      <span className="tabular">{blockStatus?.active ? `${blockStatus.sites.length} blocked` : "nothing blocked"}</span>
+                      <span className="text-ink-3">· show the file Focus Block manages</span>
+                    </summary>
+                    <div className="mt-4 space-y-3">
+                      <p className="text-xs text-ink-3">
+                        The managed region is the part between <code># BEGIN FOCUSBLOCKER</code> and{" "}
+                        <code># END FOCUSBLOCKER</code> in <code>/etc/hosts</code>.
+                        {savedAuth?.platform ? ` System: ${savedAuth.platform}.` : ""}
+                        {savedAuth?.helper_version ? ` Helper protocol: v${savedAuth.helper_version}.` : ""}
+                      </p>
+                      <p className="text-xs text-ink-3">Blocked right now: {blockStatus?.sites.join(", ") || "none"}</p>
+                      <pre className="max-h-[240px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-rule bg-paper-2 p-3 font-mono text-[11px] leading-relaxed text-ink-2">
+                        {hostsPreview ? hostsPreview.slice(0, 6000) : "Reading the file…"}
+                      </pre>
+                      <Button variant="secondary" onClick={refreshHostsPreview}>Reload</Button>
                     </div>
-                    <div className="rounded-md border border-zinc-200 dark:border-zinc-700 p-3">
-                      <dt className="font-bold text-zinc-700">Blocked sites</dt>
-                      <dd className="mt-1 text-[11px] text-zinc-600 break-words">{blockStatus?.sites.join(", ") || "None"}</dd>
-                    </div>
-                  </dl>
-                  {blockStatus?.sites && blockStatus.sites.length > 0 && <div className="mt-3 flex flex-wrap gap-1">{blockStatus.sites.map((s) => <span key={s} className="px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700 text-xs">{s}</span>)}</div>}
-                  <div className="mt-4">
-                    <p className="text-xs font-bold tracking-widest text-zinc-500 dark:text-zinc-400">/etc/hosts preview</p>
-                    <pre className="mt-2 max-h-[220px] overflow-auto rounded-md bg-zinc-900 dark:bg-zinc-700 text-zinc-100 p-3 text-[11px] leading-relaxed whitespace-pre-wrap break-words">{hostsPreview ? hostsPreview.slice(0, 6000) : "Loading hosts file…"}</pre>
-                    <p className="text-xs text-zinc-400 mt-2">Focus Block manages the section between <code className="px-1 py-0.5 bg-white dark:bg-zinc-900 dark:bg-zinc-700 border rounded"># BEGIN FOCUSBLOCKER</code> and <code className="px-1 py-0.5 bg-white dark:bg-zinc-900 dark:bg-zinc-700 border rounded"># END FOCUSBLOCKER</code>.</p>
-                  </div>
+                  </details>
                 </section>
               </div>
 
-              <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="help-heading">
-                <h3 id="help-heading" className="font-bold text-base">How blocking works</h3>
-                <ul className="mt-3 grid gap-2 text-sm text-zinc-600 lg:grid-cols-2 list-disc pl-5">
-                  <li>Create a task with a duration and optional task-specific domains.</li>
-                  <li>Starting a task combines global and task-specific domains, including supported aliases.</li>
-                  <li>Focus Block updates <code className="px-1 py-0.5 bg-zinc-100 dark:bg-zinc-800 rounded border">/etc/hosts</code> so every browser is blocked.</li>
-                  <li>Blocks are removed when the timer ends or the window closes.</li>
-                </ul>
+              <section className="space-y-3" aria-labelledby="help-heading">
+                <SectionLabel id="help-heading">How it works</SectionLabel>
+                <ol className="ml-4 list-decimal space-y-1.5 text-sm text-ink-2">
+                  <li>Pick a task. Focus Block hides its sites until the timer runs out.</li>
+                  <li>Every browser is covered, including tabs you already have open.</li>
+                  <li>When the timer ends, the sites come back.</li>
+                </ol>
               </section>
             </div>
           </>
         )}
 
-        <footer className="pt-2 pb-6 text-center text-[11px] text-zinc-400">
-          Focus Block · Tauri + React · Domain blocking via <code className="px-1 py-0.5 bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-700 rounded">/etc/hosts</code>
+        <footer className="mt-16 border-t border-rule pt-4 text-xs text-ink-3">
+          Focus Block · runs on this computer only. No account, nothing sent anywhere.
         </footer>
       </main>
       </div>
 
-      {/* Add/Edit Modal */}
+      {/* Add/Edit Modal — a raised sheet on a scrim, one column, label above field */}
       {showAdd && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="task-dialog-heading">
-          <div className="absolute inset-0 bg-zinc-900 dark:bg-zinc-700/60 backdrop-blur-sm" aria-hidden="true" onClick={() => setShowAdd(false)} />
+          <div className="absolute inset-0 bg-ink/45 backdrop-blur-sm" aria-hidden="true" onClick={() => setShowAdd(false)} />
           <form
             ref={modalRef}
             onSubmit={submitForm}
-            className="relative w-full max-w-[520px] rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-700 p-6 space-y-4 max-h-[90vh] overflow-auto"
+            className="relative max-h-[90vh] w-full max-w-[520px] space-y-5 overflow-auto rounded-lg border border-rule bg-paper p-6 shadow-[var(--t-shadow-sheet)]"
           >
-            <div className="flex items-center justify-between">
-              <h3 id="task-dialog-heading" className="text-lg font-extrabold tracking-tight">{editing ? "Edit task" : "New task"}</h3>
-              <button type="button" onClick={() => setShowAdd(false)} aria-label="Close task dialog" className="min-w-11 min-h-11 grid place-items-center rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200">
-                ×
+            <div className="flex items-center justify-between gap-4">
+              <h3 id="task-dialog-heading" className="text-lg font-semibold">{editing ? "Edit task" : "New task"}</h3>
+              <button
+                type="button"
+                onClick={() => setShowAdd(false)}
+                aria-label="Close task dialog"
+                className="grid h-11 w-11 place-items-center rounded-md text-ink-3 transition-colors duration-150 hover:bg-paper-2 hover:text-ink"
+              >
+                <Icon name="close" />
               </button>
             </div>
 
-            <div className="space-y-3">
-              <label className="block">
-                <span className="text-xs font-bold tracking-widest text-zinc-500 dark:text-zinc-400">Task title</span>
+            <div className="space-y-4">
+              <label className="block" htmlFor="task-title">
+                <span className="text-xs font-semibold uppercase tracking-[0.14em] text-ink-3">Task title</span>
                 <input
                   ref={titleInputRef}
                   id="task-title"
@@ -1177,19 +1441,21 @@ export default function App() {
                   type="text"
                   value={formTitle}
                   onChange={(e) => { setFormTitle(e.target.value); if (formError?.field === "title") setFormError(null); }}
-                  placeholder="Example: write project proposal"
+                  placeholder="Write the project proposal"
                   autoFocus
                   maxLength={80}
                   aria-invalid={formError?.field === "title" ? "true" : undefined}
                   aria-describedby={formError?.field === "title" ? "task-title-error" : undefined}
-                  className="mt-1 w-full px-3.5 py-3 rounded-md bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 outline-none focus:bg-white dark:bg-zinc-900 dark:bg-zinc-700 focus:border-violet-300 text-sm"
+                  className="mt-1.5 w-full rounded-md border border-rule-2 bg-paper px-3 py-2.5 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-ink-3 focus:border-accent"
                 />
-                {formError?.field === "title" && <p id="task-title-error" className="mt-1 text-xs text-red-700">{formError.message}</p>}
+                {formError?.field === "title" && <p id="task-title-error" role="alert" className="mt-1.5 text-xs text-danger">{formError.message}</p>}
               </label>
 
-              <label className="block">
-                <span className="text-xs font-bold tracking-widest text-zinc-500 dark:text-zinc-400">Duration in minutes</span>
-                <div className="mt-1 flex items-center gap-2">
+              <div>
+                <label className="block" htmlFor="task-duration">
+                  <span className="text-xs font-semibold uppercase tracking-[0.14em] text-ink-3">Minutes</span>
+                </label>
+                <div className="mt-1.5 flex flex-wrap items-center gap-2">
                   <input
                     ref={durationInputRef}
                     id="task-duration"
@@ -1202,7 +1468,7 @@ export default function App() {
                     onChange={(e) => { setFormDuration(parseInt(e.target.value) || 0); if (formError?.field === "duration") setFormError(null); }}
                     aria-invalid={formError?.field === "duration" ? "true" : undefined}
                     aria-describedby={formError?.field === "duration" ? "task-duration-error" : "task-duration-help"}
-                    className="flex-1 px-3.5 py-3 rounded-md bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 outline-none focus:bg-white dark:bg-zinc-900 dark:bg-zinc-700 focus:border-violet-300 text-sm tabular-nums"
+                    className="tabular w-24 rounded-md border border-rule-2 bg-paper px-3 py-2.5 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent"
                   />
                   <div className="flex gap-1">
                     {[15, 25, 45, 60].map((m) => (
@@ -1211,23 +1477,31 @@ export default function App() {
                         type="button"
                         onClick={() => { setFormDuration(m); if (formError?.field === "duration") setFormError(null); }}
                         aria-pressed={formDuration === m}
-                        className={`min-h-11 px-2.5 py-2 rounded-md text-xs font-bold border ${formDuration === m ? "bg-zinc-900 dark:bg-zinc-700 text-white border-zinc-900" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50"}`}
+                        className={`tabular min-h-11 rounded-md border px-2.5 text-xs font-semibold transition-colors duration-150 ${
+                          formDuration === m
+                            ? "border-accent bg-accent-paper text-ink"
+                            : "border-rule-2 bg-paper text-ink-2 hover:bg-paper-2"
+                        }`}
                       >
                         {m}m
                       </button>
                     ))}
                   </div>
                 </div>
-                <span id="task-duration-help" className="text-[11px] text-zinc-500 dark:text-zinc-400">The timer cannot be paused or stopped once it starts.</span>
-                {formError?.field === "duration" && <p id="task-duration-error" className="mt-1 text-xs text-red-700">{formError.message}</p>}
-              </label>
+                <span id="task-duration-help" className="mt-1.5 block text-xs text-ink-3">
+                  The timer cannot be paused or stopped once it starts.
+                </span>
+                {formError?.field === "duration" && <p id="task-duration-error" role="alert" className="mt-1.5 text-xs text-danger">{formError.message}</p>}
+              </div>
 
-              <fieldset>
-                <legend className="text-xs font-bold tracking-widest text-zinc-500 dark:text-zinc-400">Task-specific domains</legend>
-                <p id="task-sites-help" className="text-[11px] text-zinc-500 dark:text-zinc-400">Blocked together with global list when this task runs. Example: twitter.com, youtube.com, reddit.com</p>
-                <div className="mt-2 flex gap-2">
-                  <div className="flex-1">
-                    <label htmlFor="task-site" className="sr-only">Blocked domain for this task</label>
+              <fieldset className="space-y-2">
+                <legend className="text-xs font-semibold uppercase tracking-[0.14em] text-ink-3">Sites for this task</legend>
+                <p id="task-sites-help" className="text-xs text-ink-3">
+                  Added to your global list while this task runs. Example: twitter.com, youtube.com
+                </p>
+                <div className="flex flex-wrap items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <label htmlFor="task-site" className="sr-only">Site to block for this task</label>
                     <input
                       id="task-site"
                       name="site"
@@ -1244,39 +1518,42 @@ export default function App() {
                       placeholder="youtube.com"
                       aria-invalid={formError?.field === "site" ? "true" : undefined}
                       aria-describedby={formError?.field === "site" ? "task-site-error" : "task-sites-help"}
-                      className="w-full px-3.5 py-2.5 rounded-md bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 outline-none focus:bg-white dark:bg-zinc-900 dark:bg-zinc-700 focus:border-violet-300 text-sm"
+                      className="w-full rounded-md border border-rule-2 bg-paper px-3 py-2.5 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-ink-3 focus:border-accent"
                     />
-                    {formError?.field === "site" && <p id="task-site-error" className="mt-1 text-xs text-red-700">{formError.message}</p>}
+                    {formError?.field === "site" && <p id="task-site-error" role="alert" className="mt-1.5 text-xs text-danger">{formError.message}</p>}
                   </div>
-                  <button type="button" onClick={addFormSite} className="min-h-11 px-4 py-2.5 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-semibold">
-                    Add domain
-                  </button>
+                  <Button variant="secondary" onClick={addFormSite}>Add</Button>
                 </div>
-                <div className="flex flex-wrap gap-1.5 mt-2 min-h-[28px]">
+                <div className="flex flex-wrap items-center gap-1.5">
                   {formSites.length === 0 ? (
-                    <span className="text-xs text-zinc-400 italic">No task-specific domains</span>
+                    <span className="text-xs text-ink-3">No sites of its own yet.</span>
                   ) : (
                     formSites.map((s) => (
-                      <span key={s} className="inline-flex items-center gap-1 pl-2.5 pr-1 py-1 rounded bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
+                      <Chip key={s}>
                         {s}
-                        <button type="button" onClick={() => removeFormSite(s)} aria-label={`Remove ${s} from this task`} className="compact-hit grid place-items-center rounded bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-amber-200">
-                          ×
+                        <button
+                          type="button"
+                          onClick={() => removeFormSite(s)}
+                          aria-label={`Remove ${s} from this task`}
+                          className="compact-hit grid place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-danger"
+                        >
+                          <Icon name="close" className="h-3 w-3" />
                         </button>
-                      </span>
+                      </Chip>
                     ))
                   )}
                 </div>
                 {globalBlocks.length > 0 && (
-                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1">{globalBlocks.length} global domain(s) will also be blocked: {globalBlocks.join(", ")}</p>
+                  <p className="text-xs text-ink-3">
+                    Your global list is blocked as well ({globalBlocks.length} site{globalBlocks.length === 1 ? "" : "s"}).
+                  </p>
                 )}
               </fieldset>
             </div>
 
-            <div className="flex gap-2 pt-2">
-              <button type="button" onClick={() => setShowAdd(false)} className="flex-1 min-h-11 py-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 font-semibold text-sm">
-                Cancel
-              </button>
-              <button type="submit" className="flex-1 min-h-11 py-3 rounded-md bg-violet-600 hover:bg-violet-700 text-white font-bold text-sm">
+            <div className="flex gap-2 pt-1">
+              <Button variant="secondary" className="flex-1" onClick={() => setShowAdd(false)}>Cancel</Button>
+              <button type="submit" className={`${BUTTON_BASE} flex-1 ${BUTTON_VARIANTS.primary}`}>
                 {editing ? "Save changes" : "Create task"}
               </button>
             </div>
@@ -1284,10 +1561,13 @@ export default function App() {
         </div>
       )}
 
-      {/* Toast */}
+      {/* Toast — reserved for an outcome the user cannot see otherwise: a privileged write, a refusal */}
       {toast && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-full bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-medium shadow-xl flex items-center gap-2 max-w-[90vw]" role="status">
-          <span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+        <div
+          className="fixed bottom-5 left-1/2 z-50 flex max-w-[90vw] -translate-x-1/2 items-center gap-2.5 rounded-md border border-rule bg-paper px-4 py-3 text-sm text-ink shadow-[var(--t-shadow-sheet)]"
+          role="status"
+        >
+          <StatusDot tone="accent" />
           <span className="truncate">{toast}</span>
         </div>
       )}

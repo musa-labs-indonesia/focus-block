@@ -1,31 +1,61 @@
 @import "tailwindcss";
+@import "../tokens.css";
 @custom-variant dark (&:is(.dark *));
 
-* {
-  font-family: Inter, system-ui, -apple-system, sans-serif;
+/* Base layer only: the token set and its Tailwind registration live in ../tokens.css. */
+html {
+  background: var(--t-paper);
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: var(--t-font-body);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  background: var(--t-paper);
+  color: var(--t-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Display type is the app's voice: roman only, tight tracking. */
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--t-font-display);
+  font-style: normal;
+  letter-spacing: -0.02em;
+  margin: 0;
 }
 
 :focus-visible {
-  outline: 3px solid #7c3aed;
-  outline-offset: 3px;
+  outline: 2px solid var(--t-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 
 .skip-link {
   position: absolute;
   inset-inline-start: -9999px;
-  top: 1rem;
+  top: var(--t-space-md);
   z-index: 100;
-  padding: 0.75rem 1rem;
-  border-radius: 0.75rem;
-  background: #18181b;
-  color: #fff;
-  font-weight: 700;
+  padding: var(--t-space-sm) var(--t-space-md);
+  border-radius: var(--radius-md);
+  background: var(--t-ink);
+  color: var(--t-paper);
+  font-weight: 600;
 }
 
 .skip-link:focus-visible {
-  inset-inline-start: 1rem;
+  inset-inline-start: var(--t-space-md);
 }
 
+/* Small visible control, 44px hit area — the tap target the audit asked for. */
 .compact-hit {
   position: relative;
   width: 1.25rem;
@@ -43,6 +73,18 @@
   transform: translate(-50%, -50%);
 }
 
+/* The one place a mono face earns its keep: digits that must not jitter while counting. */
+.timer-digits {
+  font-family: var(--t-font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  font-weight: 600;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -54,6 +96,7 @@
   }
 }
 
+/* A 900px window is the floor; below that everything stacks. Inputs keep a readable size. */
 @media (max-width: 40rem) {
   input,
   select,
@@ -63,16 +106,20 @@
 }
 
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 10px;
+  height: 10px;
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
-  background: #d1d5db;
-  border-radius: 9999px;
+  background: var(--t-rule-2);
+  border: 3px solid var(--t-paper);
+  border-radius: var(--radius-pill);
 }
+
 ::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
+  background: var(--t-ink-3);
 }
