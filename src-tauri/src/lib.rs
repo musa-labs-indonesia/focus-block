@@ -1091,10 +1091,40 @@ fn get_schedules(handle: tauri::AppHandle) -> Result<Vec<Schedule>, String> {
     read_schedules(&conn)
 }
 
+/// A window that is blocking right now may only **grow**: its sites may be added to, its range may be
+/// widened, but it cannot be removed, moved off the current hour, or lose a site.
+///
+/// The same rule as the global list, for the same reason — a block in force must not be weakenable, or a
+/// schedule is a nudge rather than a block. Windows that are *not* open at this hour are free to edit:
+/// they contribute nothing to what is blocked, so changing one cannot weaken anything.
+fn check_schedules_change(stored: &[Schedule], proposed: &[Schedule], hour: i64) -> Result<(), String> {
+    for rule in stored.iter().filter(|r| schedule_is_active(r, hour)) {
+        let Some(next) = proposed.iter().find(|p| p.id == rule.id) else {
+            return Err("a window is blocking right now — removing it waits until it ends".to_string());
+        };
+        if !schedule_is_active(next, hour) {
+            return Err(
+                "a window is blocking right now — its hours cannot move off this hour until it ends"
+                    .to_string(),
+            );
+        }
+        if let Some(missing) = rule.sites.iter().find(|site| !next.sites.contains(site)) {
+            return Err(format!(
+                "{missing} is blocked for the rest of this window — removing it waits until it ends"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn save_schedules(handle: tauri::AppHandle, schedules: Vec<Schedule>) -> Result<(), String> {
     validate_schedules(&schedules)?;
     let mut conn = get_conn(&handle)?;
+    // a window that is blocking right now cannot be edited into a weaker one
+    let stored = read_schedules(&conn)?;
+    let hour = LAST_LOCAL_HOUR.load(std::sync::atomic::Ordering::Relaxed);
+    check_schedules_change(&stored, &schedules, hour)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM schedules", [])
         .map_err(|e| e.to_string())?;
@@ -1509,6 +1539,29 @@ mod tests {
         both.sort();
         both.dedup();
         assert_eq!(both, vec!["reddit.com", "x.com", "youtube.com"]);
+    }
+
+    #[test]
+    fn a_window_that_is_blocking_now_can_grow_but_not_be_weakened() {
+        let stored = vec![schedule("a", 7, 10, &["reddit.com"])];
+        let at = 8; // inside 7-10
+        let with = |start: i64, end: i64, sites: &[&str]| schedule("a", start, end, sites);
+
+        // adding a site, and widening the range in either direction, only makes the block stronger
+        assert!(check_schedules_change(&stored, &[with(7, 10, &["reddit.com", "x.com"])], at).is_ok());
+        assert!(check_schedules_change(&stored, &[with(6, 12, &["reddit.com"])], at).is_ok());
+        assert!(check_schedules_change(&stored, &[with(0, 24, &["reddit.com"])], at).is_ok());
+
+        // removing the window, moving it off this hour, or dropping a site is refused
+        assert!(check_schedules_change(&stored, &[], at).is_err());
+        assert!(check_schedules_change(&stored, &[with(11, 12, &["reddit.com"])], at).is_err());
+        assert!(check_schedules_change(&stored, &[with(7, 8, &["reddit.com"])], at).is_err());
+        let err = check_schedules_change(&stored, &[with(7, 10, &[])], at).unwrap_err();
+        assert!(err.starts_with("reddit.com "), "unexpected message: {err}");
+
+        // a window that is not open at this hour is free to be changed or dropped
+        assert!(check_schedules_change(&stored, &[], 12).is_ok());
+        assert!(check_schedules_change(&stored, &[schedule("a", 12, 13, &[])], 12).is_ok());
     }
 
     #[test]

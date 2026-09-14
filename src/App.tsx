@@ -833,6 +833,10 @@ export default function App() {
     ]);
   }
   function updateRule(id: string, patch: Partial<Schedule>) {
+    if (activeRuleIds.includes(id) && (patch.startHour !== undefined || patch.endHour !== undefined)) {
+      showToast("This window is blocking right now — its hours wait until it ends.");
+      return;
+    }
     commitSchedules(
       schedules.map((r) => {
         if (r.id !== id) return r;
@@ -850,6 +854,10 @@ export default function App() {
     );
   }
   function removeRule(id: string) {
+    if (activeRuleIds.includes(id)) {
+      showToast("This window is blocking right now — removing it waits until it ends.");
+      return;
+    }
     setRuleInputs((p) => {
       const next = { ...p };
       delete next[id];
@@ -873,6 +881,10 @@ export default function App() {
     setRuleInputs((p) => ({ ...p, [id]: "" }));
   }
   function removeRuleSite(id: string, site: string) {
+    if (activeRuleIds.includes(id)) {
+      showToast(`${site} is blocked for the rest of this window — removing it waits until it ends.`);
+      return;
+    }
     commitSchedules(schedules.map((r) => (r.id === id ? { ...r, sites: r.sites.filter((s) => s !== site) } : r)));
   }
 
@@ -1396,16 +1408,19 @@ export default function App() {
                   <div className="space-y-5">
                     {schedules.map((rule) => {
                       const blockedNow = activeRuleIds.includes(rule.id);
+                      // a window that is blocking right now can only grow: add sites, yes; move its hours,
+                      // drop a site or delete it, no — the backend refuses the same things
+                      const editable = !blockedNow;
                       return (
                         <div key={rule.id} className="space-y-3 border-t border-rule pt-3">
                           <div className="flex flex-wrap items-center gap-2">
                             <label htmlFor={`start-${rule.id}`} className="sr-only">Start hour</label>
-                            <select id={`start-${rule.id}`} value={rule.startHour} onChange={(e) => updateRule(rule.id, { startHour: Number(e.target.value) })} className="tabular rounded-md border border-rule-2 bg-paper px-2 py-2 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent">
+                            <select id={`start-${rule.id}`} value={rule.startHour} onChange={(e) => updateRule(rule.id, { startHour: Number(e.target.value) })} disabled={!editable} title={editable ? undefined : "Its hours wait until this window ends"} className="tabular rounded-md border border-rule-2 bg-paper px-2 py-2 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent disabled:opacity-45">
                               {START_HOURS.map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
                             </select>
                             <span className="text-sm text-ink-3">to</span>
                             <label htmlFor={`end-${rule.id}`} className="sr-only">End hour</label>
-                            <select id={`end-${rule.id}`} value={rule.endHour} onChange={(e) => updateRule(rule.id, { endHour: Number(e.target.value) })} className="tabular rounded-md border border-rule-2 bg-paper px-2 py-2 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent">
+                            <select id={`end-${rule.id}`} value={rule.endHour} onChange={(e) => updateRule(rule.id, { endHour: Number(e.target.value) })} disabled={!editable} title={editable ? undefined : "Its hours wait until this window ends"} className="tabular rounded-md border border-rule-2 bg-paper px-2 py-2 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent disabled:opacity-45">
                               {END_HOURS.map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
                             </select>
                             <span className="text-sm text-ink-3">every day</span>
@@ -1414,7 +1429,13 @@ export default function App() {
                                 <StatusDot tone="accent" /> blocked now
                               </span>
                             )}
-                            <Button variant="quiet" className="ml-auto px-2 text-xs" onClick={() => removeRule(rule.id)}>
+                            <Button
+                              variant="quiet"
+                              className="ml-auto px-2 text-xs"
+                              onClick={() => removeRule(rule.id)}
+                              disabled={!editable}
+                              title={editable ? undefined : "Removing waits until this window ends"}
+                            >
                               Remove
                             </Button>
                           </div>
@@ -1435,8 +1456,10 @@ export default function App() {
                                   <button
                                     type="button"
                                     onClick={() => removeRuleSite(rule.id, s)}
+                                    disabled={!editable}
                                     aria-label={`Remove ${s} from this window`}
-                                    className="compact-hit grid place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-danger"
+                                    title={editable ? `Remove ${s}` : "Removing waits until this window ends"}
+                                    className="compact-hit grid place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-danger disabled:opacity-45"
                                   >
                                     <Icon name="close" size="sm" />
                                   </button>
@@ -1444,6 +1467,11 @@ export default function App() {
                               ))
                             )}
                           </div>
+                          {blockedNow && (
+                            <p className="text-xs text-ink-3">
+                              Blocking now — you can add sites; its hours and removal wait until it ends.
+                            </p>
+                          )}
                         </div>
                       );
                     })}
