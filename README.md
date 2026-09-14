@@ -167,6 +167,7 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 | `npm run build` | Type check + Vite prod |
 | `npm run tauri dev` | Tauri dev window |
 | `npx tauri build` | Release + deb/rpm/AppImage |
+| `cargo test` (in `src-tauri/`) | Test suite: domain validation, the managed `/etc/hosts` section, the schedule rules, and the macOS/Windows renderers. The renderer tests extract the script this app installs and run it against a sandbox hosts file |
 
 ## Version
 
