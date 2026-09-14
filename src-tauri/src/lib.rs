@@ -827,7 +827,6 @@ fn greet(name: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // ensure db exists on startup (ponytail: WAL + 3 tables, no migration yet)
             let handle = app.handle().clone();

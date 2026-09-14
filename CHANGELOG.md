@@ -42,9 +42,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   passwordless path no longer touches `/tmp` at all.
 - **`/etc/hosts` is replaced atomically.** The section is built beside it and moved into place, so a
   crash mid-write can no longer truncate the file and take DNS down for the whole machine.
+- **The prompted path no longer stages a file either.** Without saved authorization the app used to write
+  a rendered file and have `pkexec`/`osascript`/RunAs copy it, so anything running as the user could swap
+  the contents while the password dialog was open. The renderer now runs *inside* the command being
+  authorized — `pkexec` installs or refreshes the helper and runs it in one go on Linux, and macOS/Windows
+  embed the same renderer in their authorized command — so the input is a validated domain list and there
+  is nothing on disk to race. On Linux this also removes the last use of `/tmp` from the write path.
+- **A v1 helper is refused instead of driven.** An install from 0.1.1 (or 0.2.0) only understands a file
+  path, so using it would re-open exactly what this protocol closed. It is now treated as unusable: the
+  write falls through to the prompted path, which is the honest state, and Settings asks for the one-password
+  re-enable that installs the current protocol.
 
 ### Changed
 
+- **Unused `opener` plugin removed** (dependency, registration and `opener:default` capability). It was
+  never called from the frontend, so it was pure surface: an unused IPC permission granted to the webview.
+- **Content Security Policy set** (`app.security.csp`, with a looser `devCsp` for the Vite dev server).
+  It was `null`, so the webview ran with no policy at all. Scripts are now `'self'`; `connect-src` keeps
+  `ipc: http://ipc.localhost`, which Tauri requires for IPC.
+- Windows: the elevated command is built by encoding the renderer (`-EncodedCommand`, base64/UTF-16LE)
+  instead of interpolating a path into a PowerShell string. The old code's `replace('"', "\"")` was a
+  no-op, so a quote in an env-derived path could have broken out of the command that UAC then ran.
 - **Helper protocol changed to `block <domain>…` / `clear`** and the sudoers rule with it. A helper
   installed by 0.1.1/0.2.0 only understands a file path, so the app keeps driving it in its old protocol
   until you re-enable; `check_saved_auth` reports `helper_version` and Settings shows a notice when the
