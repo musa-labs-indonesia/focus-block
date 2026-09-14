@@ -4,6 +4,7 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
 
 ## Features
 
+- **Design system** — locked in [`design.md`](design.md), tokens in [`tokens.css`](tokens.css) (OKLCH, light + dark). Type is bundled: Space Grotesk display, Inter body, JetBrains Mono for the countdown
 - **Tasks** — title, duration 1–480 min, per-task blocked domains, `createdAt`
 - **Global blocks** — applied to every session (merged with per-task list on Start)
 - **Timer** — `MM:SS`, progress bar, auto-clears hosts on finish, locks edit/delete/add while running
@@ -41,14 +42,17 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
 ```
 focus-block/
 ├── src/
-│   ├── App.tsx          # tasks, timer, global blocks, saved-authorization UI, sqlite via invoke
-│   ├── App.css, index.css, main.tsx
+│   ├── App.tsx          # the two views + design-system primitives (Button, Chip, Icon, Info, NavTab)
+│   ├── index.css        # base layer + a11y rules (tokens come from ../tokens.css)
+│   ├── main.tsx         # entry; bundles the three fonts
 │   └── assets/
 ├── src-tauri/
 │   ├── src/lib.rs       # hosts logic, saved authorization, sqlite (get_todos/sync_todos, get/set_global_blocks, get/save/clear_active_session), close handler
 │   ├── Cargo.toml       # tauri 2, rusqlite 0.31 bundled
 │   ├── tauri.conf.json  # com.muhsalaa.focusblock, 1100×750, bundle all
 │   └── icons/
+├── design.md            # the locked design system every view reads before changing
+├── tokens.css           # palette, type stacks, spacing, motion, and the Tailwind @theme registration
 ├── dist/                # vite output (frontendDist)
 └── package.json         # dev: vite, build: tsc && vite build, tauri: tauri
 ```
@@ -115,13 +119,14 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 ## Usage
 
 1. **Create task** — `New task` → title, duration (15/25/45/60 shortcuts), per-task domains (e.g. `youtube.com` — validates `a-z0-9.-`, strips `https://`, `www.`, port/path)
-2. **Global blocks** — Settings → `🌐 Global blocks` → `youtube.com` Enter. Locked during session.
-3. **Start** — `▶ Start` merges global+per-task → prompts for password (or no prompt if saved authorization is enabled) → timer runs, UI locked, close blocked, `Hosts diagnostics` shows `⛔ N sites blocked`
-4. **Finish** — auto `deactivate_blocks` + toast `is complete. Blocks cleared.` + `refreshBlockStatus`. Close button prevented until finish (toast `Cannot close — session running.`).
-5. **Saved authorization** — Settings → `Enable saved authorization` → one `pkexec` → installs helper + sudoers `muhsalaa ALL=(ALL) NOPASSWD: /usr/local/bin/focusblock-apply block *, /usr/local/bin/focusblock-apply clear`. No password from then on, for every session, until you `Disable` (which removes both files). No schedule is installed — the old `0 0 * * *` reset is deleted when you enable.
-6. **Scheduled blocks** — Settings → `Scheduled blocks` → `Add rule` → pick an hour range and add domains. Up to 2 rules, and they cannot overlap; while a window is open its domains and your global blocks are blocked, and the rule shows `Blocked now`. The app has to stay open for a window to apply — closing it releases the block.
-7. **Search** — Focus page → `Find a task` filters by title
-8. **Edit/Delete** — `✎` / `✕` disabled during session; running task cannot be edited/deleted
+2. **Blocking** — Settings → `Blocking` → `youtube.com` Enter. It applies to every session, and it is locked while one runs.
+3. **Start** — `Start` on a task merges the global and per-task lists → one password prompt (none if authorization is enabled) → the timer takes over the top of the view, the list locks, and closing is refused
+4. **Finish** — the block is released by the same writer that opened it, and the toast says what is left blocked (usually nothing, unless a scheduled window is open)
+5. **Authorization** — Settings → `Authorization` → `Enable` → one `pkexec` → installs the helper at `/usr/local/bin/focusblock-apply` and the rule at `/etc/sudoers.d/focusblock`. No password from then on, until you press `Disable` (which removes both files). No cron job is installed — the old `0 0 * * *` reset is deleted when you enable. The mechanism sits behind the ⓘ next to the status line
+6. **Scheduled blocks** — Settings → `Scheduled blocks` → `Add window` → pick an hour range and add sites. Up to 2, and they cannot overlap; while one is open its sites and your global list are blocked, and the window shows `blocked now`. Focus Block has to stay open — closing it releases the block
+7. **Search** — Focus → `Find a task` filters the ledger by title
+8. **Edit/Delete** — the pencil and X on each row are disabled during a session, and the running task cannot be edited or deleted
+9. **Technical details** — the raw `/etc/hosts` region, marker names, platform and helper version live in Settings → `Technical details`, collapsed by default. Nothing there needs attention unless you are troubleshooting
 
 ## Data & Storage
 
@@ -171,4 +176,4 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 
 ## Version
 
-`0.1.1` — `com.muhsalaa.focusblock` — Tauri 2.11, Rust `rusqlite` bundled
+`0.2.0` — `com.muhsalaa.focusblock` — Tauri 2.11, Rust `rusqlite` bundled

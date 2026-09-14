@@ -11,6 +11,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - macOS `.dmg` built in CI as a universal binary (Apple Silicon + Intel).
 - Scheduled blocks: up to two non-overlapping daily hour windows, each with its own domains, enforced while the app is open.
+- A locked design system (`design.md` + `tokens.css`): OKLCH light and dark palettes, Space Grotesk / Inter / JetBrains Mono bundled, hand-drawn icons.
 - Ad-hoc signing for the macOS bundle, so Gatekeeper says "unidentified developer" instead of "damaged".
 - Uninstall hooks (deb/rpm) remove the helper and the sudoers rule; AppImage has no hook, so there it is manual.
 - CI refuses a release whose tag does not match the packaged version.
@@ -31,6 +32,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The interface is rebuilt: ledger rows instead of cards, hairline rules instead of boxes, one accent instead of rainbow chips, and the technical detail moved behind an info tooltip or a collapsed `Technical details` section.
+- Routine confirmations no longer toast; the toast is reserved for what you cannot otherwise see — a privileged write, a refusal, a session outcome.
 - Day-session is now **Saved authorization**, and no longer resets at midnight.
 - The helper protocol is `block <domain>…` / `clear`, with the sudoers rule rewritten to match.
 - `check_saved_auth` replaces `check_day_session` (and `enable_saved_auth` / `disable_saved_auth` the others); the response is `{ enabled, platform, helper_version }`.
