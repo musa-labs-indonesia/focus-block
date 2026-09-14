@@ -47,6 +47,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The app ships real icons. The bundled set was fully transparent — every launcher, dock and window showed a placeholder because there was nothing to draw.
+- Removing the package strips its block from `/etc/hosts`, so an uninstall cannot leave sites blocked with no app left to release them.
 - Opening the app asked for a password, and asked again every 30 seconds if it was refused: global blocks now apply while a session or a scheduled window runs, not the whole time the app is open.
 - A write that needs a password is never retried on a timer — it waits for an Apply button, so nothing prompts on its own.
 - The `.deb` refreshes the icon and desktop databases on install, so the launcher gets its icon without a re-login.
