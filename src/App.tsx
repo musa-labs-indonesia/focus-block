@@ -109,7 +109,22 @@ const ICONS: Record<IconName, React.ReactElement> = {
   ),
 };
 
-function Icon({ name, className = "h-4 w-4" }: { name: IconName; className?: string }) {
+const ICON_SIZES = { xs: "h-3.5 w-3.5", sm: "h-3 w-3", md: "h-4 w-4" } as const;
+
+/**
+ * The size is a prop, not a default class. It used to default `className` to `h-4 w-4`, so any caller that
+ * passed only a layout class ("mt-0.5") silently dropped the dimensions — and an SVG with no width or
+ * height stretches to fill its container, which is how a 16px alert became a full-width red circle.
+ */
+function Icon({
+  name,
+  size = "md",
+  className = "",
+}: {
+  name: IconName;
+  size?: keyof typeof ICON_SIZES;
+  className?: string;
+}) {
   return (
     <svg
       viewBox="0 0 16 16"
@@ -119,7 +134,7 @@ function Icon({ name, className = "h-4 w-4" }: { name: IconName; className?: str
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
-      className={`shrink-0 ${className}`}
+      className={`${ICON_SIZES[size]} shrink-0 ${className}`}
     >
       {ICONS[name]}
     </svg>
@@ -179,7 +194,7 @@ function Info({ label, children }: { label: string; children: React.ReactNode })
         }}
         className="grid h-6 w-6 place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-ink"
       >
-        <Icon name="info" className="h-3.5 w-3.5" />
+        <Icon name="info" size="xs" />
       </button>
       {open && (
         <span
@@ -818,7 +833,21 @@ export default function App() {
     ]);
   }
   function updateRule(id: string, patch: Partial<Schedule>) {
-    commitSchedules(schedules.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+    commitSchedules(
+      schedules.map((r) => {
+        if (r.id !== id) return r;
+        const next = { ...r, ...patch };
+        // Keep the range forward-valid instead of refusing the click. Moving the start hour onto or past the
+        // end carries the end along, and moving the end before the start pulls the start back — setting up a
+        // window should never require picking the hours in a particular order. Only a genuine overlap with
+        // the other window is still refused.
+        if (next.startHour >= next.endHour) {
+          if (patch.startHour !== undefined) next.endHour = Math.min(next.startHour + 1, 24);
+          else next.startHour = Math.max(next.endHour - 1, 0);
+        }
+        return next;
+      }),
+    );
   }
   function removeRule(id: string) {
     setRuleInputs((p) => {
@@ -1300,7 +1329,7 @@ export default function App() {
                           title={blockedNow ? `Removing waits until this ${active ? "session" : "window"} ends` : `Remove ${s}`}
                           className="compact-hit grid place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-danger disabled:opacity-45"
                         >
-                          <Icon name="close" className="h-3 w-3" />
+                          <Icon name="close" size="sm" />
                         </button>
                       </Chip>
                     ))
@@ -1409,7 +1438,7 @@ export default function App() {
                                     aria-label={`Remove ${s} from this window`}
                                     className="compact-hit grid place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-danger"
                                   >
-                                    <Icon name="close" className="h-3 w-3" />
+                                    <Icon name="close" size="sm" />
                                   </button>
                                 </Chip>
                               ))
@@ -1603,7 +1632,7 @@ export default function App() {
                           aria-label={`Remove ${s} from this task`}
                           className="compact-hit grid place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-danger"
                         >
-                          <Icon name="close" className="h-3 w-3" />
+                          <Icon name="close" size="sm" />
                         </button>
                       </Chip>
                     ))
