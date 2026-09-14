@@ -6,7 +6,7 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
 
 - **Design system** — locked in [`design.md`](design.md), tokens in [`tokens.css`](tokens.css) (OKLCH, light + dark). Type is bundled: Space Grotesk display, Inter body, JetBrains Mono for the countdown
 - **Tasks** — title, duration 1–480 min, per-task blocked domains, `createdAt`
-- **Global blocks** — applied to every session (merged with per-task list on Start); can be added to mid-session, never removed from one
+- **Global blocks** — applied to every session (merged with per-task list on Start); can be added to while a block is running, never removed from one
 - **Timer** — `MM:SS`, progress bar, auto-clears hosts on finish, locks edit/delete/add while running
 - **Hosts blocking** — `127.0.0.1` + `::1` for apex + `www.` alias, section `# BEGIN FOCUSBLOCKER` → `# END FOCUSBLOCKER` (`# BEGIN BLOCKER2` from 0.1.1 is still stripped on sight), `resolvectl`/`systemd-resolve` flush
 - **Domain aliases** — `twitter ↔ x.com ↔ t.co`, `youtube ↔ youtu.be ↔ m.youtube ↔ youtube-nocookie`, `instagram ↔ ig.me`, etc. (Rust `domain_aliases`)
@@ -119,7 +119,7 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 ## Usage
 
 1. **Create task** — `New task` → title, duration (15/25/45/60 shortcuts), per-task domains (e.g. `youtube.com` — validates `a-z0-9.-`, strips `https://`, `www.`, port/path)
-2. **Blocking** — Settings → `Blocking` → `youtube.com` Enter. It applies to every session, and while a session runs you can add to it but not remove from it.
+2. **Blocking** — Settings → `Blocking` → `youtube.com` Enter. It applies to every session, and while a block is running — a session or a scheduled window — you can add to it but not remove from it.
 3. **Start** — `Start` on a task merges the global and per-task lists → one password prompt (none if authorization is enabled) → the timer takes over the top of the view, the list locks, and closing is refused
 4. **Finish** — the block is released by the same writer that opened it, and the toast says what is left blocked (usually nothing, unless a scheduled window is open)
 5. **Authorization** — Settings → `Authorization` → `Enable` → one `pkexec` → installs the helper at `/usr/local/bin/focusblock-apply` and the rule at `/etc/sudoers.d/focusblock`. No password from then on, until you press `Disable` (which removes both files). No cron job is installed — the old `0 0 * * *` reset is deleted when you enable. The mechanism sits behind the ⓘ next to the status line

@@ -723,10 +723,12 @@ export default function App() {
     const rule = schedules.find((r) => activeRuleIds.includes(r.id));
     return rule ? `${String(rule.endHour).padStart(2, "0")}:00` : null;
   }, [activeRuleIds, schedules]);
-  const closeBlocked = !!active || activeRuleIds.length > 0;
+  // A session or an open window is a block in force: it refuses to let the app close, and it refuses to
+  // lose a global entry. One name, used for both, so the two cannot drift apart.
+  const blockedNow = !!active || activeRuleIds.length > 0;
 
   useEffect(() => {
-    if (!closeBlocked) return;
+    if (!blockedNow) return;
     let unlisten: (() => void) | undefined;
     try {
       getCurrentWindow()
@@ -749,7 +751,7 @@ export default function App() {
     return () => {
       if (unlisten) unlisten();
     };
-  }, [closeBlocked, active, windowClosesAt]);
+  }, [blockedNow, active, windowClosesAt]);
 
   // cleanup on unmount: deactivate if we are leaving while active? No, only if timer ended.
   // But if user closes window, Rust will clean via on_window_event.
@@ -779,8 +781,8 @@ export default function App() {
     setGlobalError(null);
   }
   function removeGlobalSite(s: string) {
-    if (active) {
-      showToast(`${s} is blocked for the rest of this session — removing it waits until the timer ends.`);
+    if (blockedNow) {
+      showToast(`${s} is blocked for the rest of this ${active ? "session" : "window"} — removing it waits until it ends.`);
       return;
     }
     setGlobalBlocks((p) => p.filter((x) => x !== s));
@@ -1278,8 +1280,10 @@ export default function App() {
                   </div>
                   <Button variant="secondary" onClick={addGlobalSite}>Add</Button>
                 </div>
-                {active && (
-                  <p className="text-xs text-ink-3">You can add while a session runs. Removing waits until it ends.</p>
+                {blockedNow && (
+                  <p className="text-xs text-ink-3">
+                    You can add while a block is running. Removing waits until it ends.
+                  </p>
                 )}
                 <div className="flex flex-wrap items-center gap-1.5">
                   {globalBlocks.length === 0 ? (
@@ -1291,9 +1295,9 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => removeGlobalSite(s)}
-                          disabled={!!active}
+                          disabled={blockedNow}
                           aria-label={`Remove ${s} from the global list`}
-                          title={active ? "Removing waits until the session ends" : `Remove ${s}`}
+                          title={blockedNow ? `Removing waits until this ${active ? "session" : "window"} ends` : `Remove ${s}`}
                           className="compact-hit grid place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-danger disabled:opacity-45"
                         >
                           <Icon name="close" className="h-3 w-3" />

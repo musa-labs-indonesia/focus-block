@@ -996,18 +996,33 @@ fn session_is_running(conn: &rusqlite::Connection) -> bool {
     .unwrap_or(false)
 }
 
-/// While a session runs, the global list may only **grow**.
+/// What is holding the block shut right now, if anything: a session first, then an open window.
 ///
-/// An addition makes the block stricter, so it cannot be a way out of a session; removing one would weaken
-/// a session the user has committed to, so it waits until the timer ends. Pure, so the policy is testable
-/// without a database — and enforced here rather than only in the UI, which is cosmetic.
-fn check_global_change(stored: &[String], proposed: &[String], session_running: bool) -> Result<(), String> {
-    if !session_running {
-        return Ok(());
+/// Split out so the message and the policy always agree about which one it is — and so the wiring is
+/// covered by a test rather than trusted.
+fn block_is_held_by(session_running: bool, window_open: bool) -> Option<&'static str> {
+    if session_running {
+        Some("session")
+    } else if window_open {
+        Some("scheduled window")
+    } else {
+        None
     }
+}
+
+/// While a block is running — a session or an open scheduled window — the global list may only **grow**.
+///
+/// An addition makes the block stricter, so it cannot be a way out; removing one would weaken a block the
+/// user has committed to, so it waits until that block ends. `held_by` names what is holding it, for the
+/// message. Pure, so the policy is testable without a database — and enforced here rather than only in the
+/// UI, which is cosmetic.
+fn check_global_change(stored: &[String], proposed: &[String], held_by: Option<&str>) -> Result<(), String> {
+    let Some(reason) = held_by else {
+        return Ok(());
+    };
     match stored.iter().find(|site| !proposed.contains(site)) {
         Some(site) => Err(format!(
-            "{site} is blocked for the rest of this session — removing it waits until the timer ends"
+            "{site} is blocked for the rest of this {reason} — removing it waits until it ends"
         )),
         None => Ok(()),
     }
@@ -1045,9 +1060,16 @@ fn get_global_blocks(handle: tauri::AppHandle) -> Result<Vec<String>, String> {
 #[tauri::command]
 fn set_global_blocks(handle: tauri::AppHandle, sites: Vec<String>) -> Result<(), String> {
     let mut conn = get_conn(&handle)?;
-    // additions are always fine; a removal waits for the session to end
+    // Additions are always fine. A removal waits until nothing is holding the block shut — a session or an
+    // open window, the same two things that refuse to let the window close.
     let stored = read_global_blocks(&conn)?;
-    check_global_change(&stored, &sites, session_is_running(&conn))?;
+    let hour = LAST_LOCAL_HOUR.load(std::sync::atomic::Ordering::Relaxed);
+    let schedules = read_schedules(&conn)?;
+    let held_by = block_is_held_by(
+        session_is_running(&conn),
+        !active_schedule_sites(&schedules, hour).is_empty(),
+    );
+    check_global_change(&stored, &sites, held_by)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM global_blocks", [])
         .map_err(|e| e.to_string())?;
@@ -1490,22 +1512,37 @@ mod tests {
     }
 
     #[test]
-    fn a_session_can_gain_global_blocks_but_not_lose_them() {
-        let stored: Vec<String> = vec!["reddit.com".into(), "x.com".into()];
+    fn a_block_can_gain_global_blocks_but_not_lose_them() {        let stored: Vec<String> = vec!["reddit.com".into(), "x.com".into()];
         let to = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
-        // no session: anything goes, including clearing the list
-        assert!(check_global_change(&stored, &[], false).is_ok());
+        // nothing is holding the block: anything goes, including clearing the list
+        assert!(check_global_change(&stored, &[], None).is_ok());
 
         // a session: adding is fine, in any order — it only makes the block stricter
-        assert!(check_global_change(&stored, &to(&["reddit.com", "x.com", "youtube.com"]), true).is_ok());
-        assert!(check_global_change(&stored, &to(&["x.com", "reddit.com"]), true).is_ok());
-        assert!(check_global_change(&to(&[]), &to(&["youtube.com"]), true).is_ok());
+        let session = Some("session");
+        assert!(check_global_change(&stored, &to(&["reddit.com", "x.com", "youtube.com"]), session).is_ok());
+        assert!(check_global_change(&stored, &to(&["x.com", "reddit.com"]), session).is_ok());
+        assert!(check_global_change(&to(&[]), &to(&["youtube.com"]), session).is_ok());
 
         // a session: dropping one is refused, and the message names the site
-        let err = check_global_change(&stored, &to(&["reddit.com"]), true).unwrap_err();
+        let err = check_global_change(&stored, &to(&["reddit.com"]), session).unwrap_err();
         assert!(err.starts_with("x.com "), "unexpected message: {err}");
-        assert!(check_global_change(&stored, &[], true).is_err());
+
+        // an open window holds the same way — deleting a global must not be a way to weaken one — and the
+        // message says which of the two is holding it
+        let window = Some("scheduled window");
+        assert!(check_global_change(&stored, &to(&["reddit.com", "x.com", "youtube.com"]), window).is_ok());
+        let err = check_global_change(&stored, &[], window).unwrap_err();
+        assert!(err.contains("scheduled window"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn a_session_and_a_window_both_hold_the_block_and_say_which_they_are() {
+        // the session is the stronger claim, so it wins the message when both are true
+        assert_eq!(block_is_held_by(true, true), Some("session"));
+        assert_eq!(block_is_held_by(true, false), Some("session"));
+        assert_eq!(block_is_held_by(false, true), Some("scheduled window"));
+        assert_eq!(block_is_held_by(false, false), None);
     }
 
     #[test]

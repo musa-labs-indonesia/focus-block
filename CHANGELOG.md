@@ -10,7 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - macOS `.dmg` built in CI as a universal binary (Apple Silicon + Intel).
-- Global blocks can be added while a session runs; removing one waits until the timer ends, so a session can only ever get stricter.
+- Global blocks can be added while a block is running — a session or a scheduled window — and removing one waits until that block ends, so a block can only ever get stricter.
 - Scheduled blocks: up to two non-overlapping daily hour windows, each with its own domains, enforced while the app is open.
 - A locked design system (`design.md` + `tokens.css`): OKLCH light and dark palettes, Space Grotesk / Inter / JetBrains Mono bundled, hand-drawn icons.
 - Ad-hoc signing for the macOS bundle, so Gatekeeper says "unidentified developer" instead of "damaged".
