@@ -53,6 +53,36 @@ function formatTime(sec: number) {
 }
 
 // Main Component
+type Schedule = {
+  id: string;
+  startHour: number;
+  endHour: number;
+  sites: string[];
+  createdAt: number;
+};
+
+// start options 0-23 and end options 1-24: a window always moves forward, which keeps "cannot overlap"
+// unambiguous, and matches the backend's CHECK constraints
+const START_HOURS = Array.from({ length: 24 }, (_, i) => i);
+const END_HOURS = Array.from({ length: 24 }, (_, i) => i + 1);
+const MAX_SCHEDULES = 2;
+
+/** Mirrors the backend rule so the UI can refuse an overlap before a round trip. */
+function validateSchedules(list: Schedule[]): string | null {
+  if (list.length > MAX_SCHEDULES) return `At most ${MAX_SCHEDULES} scheduled blocks.`;
+  for (const r of list) {
+    if (r.startHour >= r.endHour) return "Each rule needs a start hour before its end hour.";
+  }
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const a = list[i];
+      const b = list[j];
+      if (a.startHour < b.endHour && b.startHour < a.endHour) return "Scheduled blocks cannot overlap.";
+    }
+  }
+  return null;
+}
+
 export default function App() {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [globalBlocks, setGlobalBlocks] = useState<string[]>([]);
@@ -64,6 +94,10 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [blockStatus, setBlockStatus] = useState<{ active: boolean; sites: string[] } | null>(null);
   const [globalInput, setGlobalInput] = useState("");
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [ruleInputs, setRuleInputs] = useState<Record<string, string>>({});
+  const [activeRuleIds, setActiveRuleIds] = useState<string[]>([]);
   const [savedAuth, setSavedAuth] = useState<{ enabled: boolean; platform: string; helper_version: number } | null>(null);
   const [page, setPage] = useState<"focus" | "settings">("focus");
   const [hostsPreview, setHostsPreview] = useState<string | null>(null);
@@ -161,10 +195,11 @@ export default function App() {
     let cancelled = false;
     async function load() {
       try {
-        const [t, g, s] = await Promise.all([
+        const [t, g, s, sch] = await Promise.all([
           invoke<Todo[]>("get_todos"),
           invoke<string[]>("get_global_blocks"),
           invoke<ActiveSession | null>("get_active_session"),
+          invoke<Schedule[]>("get_schedules"),
         ]);
         if (cancelled) return;
         let migratedTodos = t;
@@ -210,6 +245,7 @@ export default function App() {
         }
         setTodos(migratedTodos);
         setGlobalBlocks(migratedGlobals);
+        setSchedules(sch);
         setActive(migratedSession);
         if (migratedSession) {
           const rem = Math.ceil((migratedSession.endAt - Date.now()) / 1000);
@@ -265,6 +301,46 @@ export default function App() {
   }, [globalBlocks, dbLoaded]);
   useEffect(() => {
     if (!dbLoaded) return;
+    // the backend validates as well; a rejected list (overlap, too many) is reported and the previously
+    // stored one stays in force
+    invoke("save_schedules", { schedules }).catch((e) =>
+      showToast(`Scheduled blocks were not saved: ${String(e).slice(0, 120)}`),
+    );
+  }, [schedules, dbLoaded]);
+
+  // Schedules only apply while the app is open, so recompute what should be blocked every half minute
+  // and after anything that changes it. sync_blocks writes only when the file would actually differ, so
+  // a tick that changes nothing costs nothing and asks for no password.
+  const sessionSitesRef = useRef<string[]>([]);
+  sessionSitesRef.current = active
+    ? Array.from(new Set([...globalBlocks, ...(todos.find((t) => t.id === active.todoId)?.blockedSites ?? [])]))
+    : [];
+  useEffect(() => {
+    if (!dbLoaded) return;
+    let cancelled = false;
+    async function sync() {
+      try {
+        const res = await invoke<{ changed: boolean; blocked: number; activeRuleIds: string[] }>("sync_blocks", {
+          hour: new Date().getHours(),
+          sessionSites: sessionSitesRef.current,
+        });
+        if (cancelled) return;
+        setActiveRuleIds(res.activeRuleIds);
+        if (res.changed) {
+          await refreshBlockStatus();
+          await refreshHostsPreview();
+        }
+      } catch {}
+    }
+    sync();
+    const id = window.setInterval(sync, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [dbLoaded, schedules, globalBlocks, active]);
+  useEffect(() => {
+    if (!dbLoaded) return;
     if (active)
       invoke("save_active_session", { session: active }).catch(() => {
         try {
@@ -293,14 +369,24 @@ export default function App() {
         const hasActive = !!sess && sess.endAt > Date.now();
         const isExpired = sess ? sess.endAt <= Date.now() : false;
         if (status.active && (!hasActive || isExpired)) {
-          showToast("Found leftover block from previous session — clearing…");
+          // recompute what should be blocked rather than assuming nothing should be: a scheduled window
+          // may legitimately be running right now, in which case the block is not an orphan
           try {
-            await invoke("deactivate_blocks");
+            const res = await invoke<{ changed: boolean; blocked: number }>("sync_blocks", {
+              hour: new Date().getHours(),
+              sessionSites: [],
+            });
             await refreshBlockStatus();
             await refreshHostsPreview();
-            showToast("Orphaned block cleared");
+            if (res.changed) {
+              showToast(
+                res.blocked === 0
+                  ? "Leftover block from a previous session cleared"
+                  : `Scheduled block active: ${res.blocked} site(s)`,
+              );
+            }
           } catch (e: any) {
-            showToast(`Could not auto-clear orphaned block: ${String(e).slice(0, 120)} — clear manually in Settings`);
+            showToast(`Could not clean up the leftover block: ${String(e).slice(0, 120)} — clear manually in Settings`);
           }
           if (isExpired) invoke("clear_active_session").catch(() => {});
         } else if (hasActive && !status.active) {
@@ -457,6 +543,65 @@ export default function App() {
       return;
     }
     setGlobalBlocks((p) => p.filter((x) => x !== s));
+  }
+
+  // --- scheduled blocks ---
+  function commitSchedules(next: Schedule[]) {
+    const problem = validateSchedules(next);
+    if (problem) {
+      setScheduleError(problem);
+      showToast(problem);
+      return;
+    }
+    setScheduleError(null);
+    setSchedules(next);
+  }
+  function addRule() {
+    if (schedules.length >= MAX_SCHEDULES) {
+      showToast(`At most ${MAX_SCHEDULES} scheduled blocks.`);
+      return;
+    }
+    // offer a three hour window that cannot overlap what is already there
+    const clashes = (start: number) => schedules.some((r) => start < r.endHour && r.startHour < start + 3);
+    const start = [7, 12, 17, 20, 0].find((s) => !clashes(s));
+    if (start === undefined) {
+      showToast("No free window left — adjust or remove a rule first.");
+      return;
+    }
+    const now = Date.now();
+    commitSchedules([
+      ...schedules,
+      { id: `sch_${now}`, startHour: start, endHour: start + 3, sites: [], createdAt: now },
+    ]);
+  }
+  function updateRule(id: string, patch: Partial<Schedule>) {
+    commitSchedules(schedules.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  }
+  function removeRule(id: string) {
+    setRuleInputs((p) => {
+      const next = { ...p };
+      delete next[id];
+      return next;
+    });
+    commitSchedules(schedules.filter((r) => r.id !== id));
+  }
+  function addRuleSite(id: string) {
+    const rule = schedules.find((r) => r.id === id);
+    if (!rule) return;
+    const site = normalizeInputSite(ruleInputs[id] ?? "");
+    if (!site) {
+      showToast("Enter a valid domain, such as youtube.com.");
+      return;
+    }
+    if (rule.sites.includes(site)) {
+      showToast("That domain is already in this rule.");
+      return;
+    }
+    commitSchedules(schedules.map((r) => (r.id === id ? { ...r, sites: [...r.sites, site] } : r)));
+    setRuleInputs((p) => ({ ...p, [id]: "" }));
+  }
+  function removeRuleSite(id: string, site: string) {
+    commitSchedules(schedules.map((r) => (r.id === id ? { ...r, sites: r.sites.filter((s) => s !== site) } : r)));
   }
 
   // form handlers
@@ -885,6 +1030,55 @@ export default function App() {
                   </div>
                   <p className="text-xs text-zinc-400 mt-3">{savedAuth?.platform === "linux" ? "Disabled means Focus Block asks for permission at each session start and finish. Enabling requires one system authorization, then never again until you disable it." : savedAuth ? "Linux only — macOS and Windows ask for system permission at each session start and finish." : ""}</p>
                   {savedAuth?.helper_version === 1 && <p className="mt-3 border-l-2 border-amber-300 pl-3 text-xs text-amber-800">Installed by an older version and no longer used, so writes ask for a password now. Press Enable to replace it — one password.</p>}
+                </section>
+
+                <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="schedule-heading">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <h3 id="schedule-heading" className="font-bold text-base">Scheduled blocks</h3>
+                      <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Block a set of sites during an hour range, every day. Up to {MAX_SCHEDULES} windows, and they cannot overlap.</p>
+                    </div>
+                    <span className="shrink-0 px-2.5 py-1 rounded text-xs font-bold border border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400">{schedules.length}/{MAX_SCHEDULES}</span>
+                  </div>
+
+                  {scheduleError && <p role="alert" className="mt-3 border-l-2 border-red-300 pl-3 text-xs text-red-700">{scheduleError}</p>}
+
+                  <div className="mt-4 space-y-3">
+                    {schedules.map((rule) => {
+                      const blockedNow = activeRuleIds.includes(rule.id);
+                      return (
+                        <div key={rule.id} className={`rounded-md border p-3 ${blockedNow ? "border-red-200 bg-red-50" : "border-zinc-200 dark:border-zinc-700"}`}>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <label htmlFor={`start-${rule.id}`} className="sr-only">Start hour</label>
+                            <select id={`start-${rule.id}`} value={rule.startHour} onChange={(e) => updateRule(rule.id, { startHour: Number(e.target.value) })} className="min-h-11 px-2.5 rounded-md bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-sm">
+                              {START_HOURS.map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
+                            </select>
+                            <span className="text-xs text-zinc-500 dark:text-zinc-400">to</span>
+                            <label htmlFor={`end-${rule.id}`} className="sr-only">End hour</label>
+                            <select id={`end-${rule.id}`} value={rule.endHour} onChange={(e) => updateRule(rule.id, { endHour: Number(e.target.value) })} className="min-h-11 px-2.5 rounded-md bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-sm">
+                              {END_HOURS.map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
+                            </select>
+                            <span className="text-xs text-zinc-500 dark:text-zinc-400">every day</span>
+                            {blockedNow && <span className="px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700 text-xs font-bold">Blocked now</span>}
+                            <button onClick={() => removeRule(rule.id)} className="ml-auto min-h-11 px-3 rounded-md bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-xs font-semibold">Remove</button>
+                          </div>
+                          <div className="flex gap-2 mt-3">
+                            <label htmlFor={`site-${rule.id}`} className="sr-only">Domain for this rule</label>
+                            <input id={`site-${rule.id}`} type="text" autoComplete="off" value={ruleInputs[rule.id] ?? ""} onChange={(e) => setRuleInputs((p) => ({ ...p, [rule.id]: e.target.value }))} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addRuleSite(rule.id))} placeholder="x.com" className="flex-1 px-3.5 py-2.5 rounded-md bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-sm outline-none focus:border-violet-500 placeholder:text-zinc-400" />
+                            <button onClick={() => addRuleSite(rule.id)} className="min-h-11 px-4 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-semibold">Add domain</button>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5 mt-3 min-h-[24px]">
+                            {rule.sites.length === 0 ? <span className="text-xs text-zinc-400 italic">No extra domains — your global blocks still apply in this window.</span> : rule.sites.map((s) => (
+                              <span key={s} className="inline-flex items-center gap-1.5 pl-2.5 pr-1 py-1 rounded bg-red-50 border border-red-200 text-red-700 text-xs font-medium">{s}<button onClick={() => removeRuleSite(rule.id, s)} aria-label={`Remove ${s} from this rule`} className="compact-hit grid place-items-center rounded bg-white dark:bg-zinc-900 border border-red-200">×</button></span>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {schedules.length < MAX_SCHEDULES && <button onClick={addRule} className="min-h-11 px-4 py-2 rounded-md bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700">Add rule</button>}
+                  </div>
+
+                  <p className="mt-4 border-l-2 border-amber-300 pl-3 text-xs text-amber-800">A window applies while Focus Block is open — closing the app releases it. Without saved authorization, the start and the end of a window each ask for a password.</p>
                 </section>
 
                 <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="hosts-heading">

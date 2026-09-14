@@ -10,7 +10,8 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
 - **Hosts blocking** — `127.0.0.1` + `::1` for apex + `www.` alias, section `# BEGIN FOCUSBLOCKER` → `# END FOCUSBLOCKER` (`# BEGIN BLOCKER2` from 0.1.1 is still stripped on sight), `resolvectl`/`systemd-resolve` flush
 - **Domain aliases** — `twitter ↔ x.com ↔ t.co`, `youtube ↔ youtu.be ↔ m.youtube ↔ youtube-nocookie`, `instagram ↔ ig.me`, etc. (Rust `domain_aliases`)
 - **Saved authorization** (Linux) — one password, then no prompts ever: helper `/usr/local/bin/focusblock-apply` + sudoers `/etc/sudoers.d/focusblock`, `sudo -n` path. Persists until disabled; disable restores a password at every Start/End. Removing the package (deb/rpm) removes both; an AppImage has no uninstall hook, so disable it first or delete both paths by hand
-- **SQLite** — `rusqlite 0.31 bundled` at `~/.local/share/com.muhsalaa.focusblock/focusblock.db` (WAL): `todos`, `global_blocks`, `active_session`; migrates once from `localStorage`
+- **SQLite** — `rusqlite 0.31 bundled` at `~/.local/share/com.muhsalaa.focusblock/focusblock.db` (WAL): `todos`, `global_blocks`, `schedules`, `active_session`; migrates once from `localStorage`
+- **Scheduled blocks** — up to 2 daily windows (hour ranges, no overlap) each with its own domains; while a window is open those domains plus your global blocks are blocked
 - **Hard block close** — `CloseRequested` prevented while `active_session.end_at > now` (Rust + frontend `onCloseRequested` toast), orphan hosts auto-recovered on next launch
 - **Reject → no session** — if `pkexec`/`sudo` rejected, `activate_blocks` fails and session does not start
 
@@ -24,6 +25,10 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
    `osascript` on macOS, an encoded PowerShell command on Windows). Nothing this process can write is ever
    read as root, so there is no staging file to race.
 3. `deactivate_blocks` on timer end / window close (best-effort, and the only implementation of that path) / orphan recovery on next launch
+4. Every 30s, and after any change, `sync_blocks` recomputes what should be blocked — global blocks ∪ running
+   session ∪ open scheduled windows — and writes only if the file would actually differ. So a scheduled
+   window opens and closes by itself, a tick that changes nothing costs nothing, and startup cleanup can
+   tell an orphaned block from a legitimately scheduled one
 
 ## Tech Stack
 
@@ -114,8 +119,9 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 3. **Start** — `▶ Start` merges global+per-task → prompts for password (or no prompt if saved authorization is enabled) → timer runs, UI locked, close blocked, `Hosts diagnostics` shows `⛔ N sites blocked`
 4. **Finish** — auto `deactivate_blocks` + toast `is complete. Blocks cleared.` + `refreshBlockStatus`. Close button prevented until finish (toast `Cannot close — session running.`).
 5. **Saved authorization** — Settings → `Enable saved authorization` → one `pkexec` → installs helper + sudoers `muhsalaa ALL=(ALL) NOPASSWD: /usr/local/bin/focusblock-apply block *, /usr/local/bin/focusblock-apply clear`. No password from then on, for every session, until you `Disable` (which removes both files). No schedule is installed — the old `0 0 * * *` reset is deleted when you enable.
-6. **Search** — Focus page → `Find a task` filters by title
-7. **Edit/Delete** — `✎` / `✕` disabled during session; running task cannot be edited/deleted
+6. **Scheduled blocks** — Settings → `Scheduled blocks` → `Add rule` → pick an hour range and add domains. Up to 2 rules, and they cannot overlap; while a window is open its domains and your global blocks are blocked, and the rule shows `Blocked now`. The app has to stay open for a window to apply — closing it releases the block.
+7. **Search** — Focus page → `Find a task` filters by title
+8. **Edit/Delete** — `✎` / `✕` disabled during session; running task cannot be edited/deleted
 
 ## Data & Storage
 
@@ -138,6 +144,7 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 - **First Start/End without saved authorization:** `pkexec` dialog (system password)
 - **Saved authorization enabled:** `sudo -n /usr/local/bin/focusblock-apply block <domain>…` (no prompt) and `sudo -n /usr/local/bin/focusblock-apply clear`. The helper validates every name against `a-z0-9.-` and renders the `127.0.0.1` / `::1` lines itself, then swaps the file in with `mv` — it never copies caller-supplied content, so a hostile caller can at most ask to block a domain, and a crash can't leave `/etc/hosts` half-written
 - **Without saved authorization:** the same renderer runs under `pkexec` on Linux — installed or refreshed in the very same authorized command — or embedded in the macOS admin command / an encoded PowerShell command on the others. One prompt per Start/End, same validation, same atomic swap. Nothing is staged, so there is no file to swap out from under the prompt; and because that command rewrites the helper, the first prompted write after upgrading from 0.1.1 is what makes the old file-path rule inert
+- **Scheduled windows:** a window writes once when it opens and once when it closes, so without saved authorization that is two extra prompts a day, and none with it. Nothing else touches `/etc/hosts` in between — the 30s tick only writes when the desired block actually changed
 - **Trust model worth keeping:** the helper accepts `block <domain>…` or `clear` and nothing else, and renders the section from names it validates itself. Any future change that lets caller-supplied *content* become `/etc/hosts` re-opens the whole class of bugs this design removed
 - **Files:** `/usr/local/bin/focusblock-apply` `755`, `/etc/sudoers.d/focusblock` `440`, both `root:root`. One `pkexec` stages the rule, validates it with `visudo -cf`, and only then installs — a rule that does not parse never reaches `sudoers.d`, and a failed install changes nothing. No cron file is installed — `/etc/cron.d/focusblock` only ever appears as a leftover from 0.1.1 and is removed on enable
 - **Check:** `sudo -n -l` should show `(ALL) NOPASSWD: /usr/local/bin/focusblock-apply block *, /usr/local/bin/focusblock-apply clear`; `pkexec cat /etc/sudoers.d/focusblock` to inspect. `head -2 /usr/local/bin/focusblock-apply` should show `# focusblock-helper v2`

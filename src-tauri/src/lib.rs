@@ -41,6 +41,19 @@ struct ActiveSession {
     duration_seconds: i64,
 }
 
+/// A daily window. Hours are local clock hours and the range is half-open: 7 to 10 blocks from 07:00
+/// through 09:59 and releases at 10:00.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Schedule {
+    id: String,
+    start_hour: i64,
+    end_hour: i64,
+    /// Raw as typed; aliases and `www.` are applied when the block is built, like global blocks.
+    sites: Vec<String>,
+    created_at: i64,
+}
+
 fn db_path(handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = handle
         .path()
@@ -77,6 +90,13 @@ fn get_conn(handle: &tauri::AppHandle) -> Result<Connection, String> {
             created_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS global_blocks (site TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS schedules (
+            id TEXT PRIMARY KEY,
+            start_hour INTEGER NOT NULL CHECK(start_hour BETWEEN 0 AND 23),
+            end_hour INTEGER NOT NULL CHECK(end_hour BETWEEN 1 AND 24),
+            sites TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS active_session (
             todo_id TEXT NOT NULL,
             start_at INTEGER NOT NULL,
@@ -139,6 +159,41 @@ fn domain_aliases(domain: &str) -> Vec<String> {
         "reddit.com" => vec!["reddit.com".into(), "old.reddit.com".into()],
         _ => vec![domain.to_string()],
     }
+}
+
+/// Half-open window: 7 to 10 blocks 07:00-09:59 and releases at 10:00.
+fn schedule_is_active(schedule: &Schedule, hour: i64) -> bool {
+    hour >= schedule.start_hour && hour < schedule.end_hour
+}
+
+/// At most two rules, each a forward range, and none overlapping another. One place decides what is
+/// valid, so the UI can show the same message instead of inventing its own rules.
+fn validate_schedules(schedules: &[Schedule]) -> Result<(), String> {
+    if schedules.len() > MAX_SCHEDULES {
+        return Err(format!("at most {} scheduled blocks", MAX_SCHEDULES));
+    }
+    for s in schedules {
+        if s.start_hour < 0 || s.end_hour > 24 || s.start_hour >= s.end_hour {
+            return Err("each scheduled block needs a start hour before its end hour".to_string());
+        }
+    }
+    for (i, a) in schedules.iter().enumerate() {
+        for b in schedules.iter().skip(i + 1) {
+            if a.start_hour < b.end_hour && b.start_hour < a.end_hour {
+                return Err(SCHEDULE_OVERLAP.to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every site from every rule covering this hour.
+fn active_schedule_sites(schedules: &[Schedule], hour: i64) -> Vec<String> {
+    schedules
+        .iter()
+        .filter(|s| schedule_is_active(s, hour))
+        .flat_map(|s| s.sites.iter().cloned())
+        .collect()
 }
 
 fn expand_sites(sites: Vec<String>) -> Vec<String> {
@@ -251,6 +306,12 @@ fn try_write_hosts_direct(content: &str) -> Result<(), String> {
 // bytes out of /etc/hosts.
 /// Domains per write. Mirrored into the renderer below so the app and the script cannot disagree.
 const MAX_DOMAINS: usize = 500;
+
+/// The user asked for at most two daily windows, and for them not to overlap. Both limits live here so
+/// the UI and the backend cannot disagree about what is valid.
+const MAX_SCHEDULES: usize = 2;
+
+const SCHEDULE_OVERLAP: &str = "scheduled blocks cannot overlap";
 
 /// Windows carries the renderer on a command line, so the encoded form has a budget of its own. It is
 /// far below the script's cap and hits first — and exceeding it used to fail silently (see the launcher).
@@ -874,9 +935,7 @@ fn sync_todos(handle: tauri::AppHandle, todos: Vec<Todo>) -> Result<(), String> 
     Ok(())
 }
 
-#[tauri::command]
-fn get_global_blocks(handle: tauri::AppHandle) -> Result<Vec<String>, String> {
-    let conn = get_conn(&handle)?;
+fn read_global_blocks(conn: &rusqlite::Connection) -> Result<Vec<String>, String> {
     let mut stmt = conn
         .prepare("SELECT site FROM global_blocks ORDER BY site")
         .map_err(|e| e.to_string())?;
@@ -888,6 +947,35 @@ fn get_global_blocks(handle: tauri::AppHandle) -> Result<Vec<String>, String> {
         out.push(r.map_err(|e| e.to_string())?);
     }
     Ok(out)
+}
+
+fn read_schedules(conn: &rusqlite::Connection) -> Result<Vec<Schedule>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, start_hour, end_hour, sites, created_at FROM schedules ORDER BY start_hour")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            let sites_json: String = row.get(3)?;
+            Ok(Schedule {
+                id: row.get(0)?,
+                start_hour: row.get(1)?,
+                end_hour: row.get(2)?,
+                sites: serde_json::from_str(&sites_json).unwrap_or_default(),
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn get_global_blocks(handle: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let conn = get_conn(&handle)?;
+    read_global_blocks(&conn)
 }
 
 #[tauri::command]
@@ -905,6 +993,74 @@ fn set_global_blocks(handle: tauri::AppHandle, sites: Vec<String>) -> Result<(),
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// --- scheduled daily blocks ---
+#[tauri::command]
+fn get_schedules(handle: tauri::AppHandle) -> Result<Vec<Schedule>, String> {
+    let conn = get_conn(&handle)?;
+    read_schedules(&conn)
+}
+
+#[tauri::command]
+fn save_schedules(handle: tauri::AppHandle, schedules: Vec<Schedule>) -> Result<(), String> {
+    validate_schedules(&schedules)?;
+    let mut conn = get_conn(&handle)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM schedules", [])
+        .map_err(|e| e.to_string())?;
+    for s in &schedules {
+        let sites_json = serde_json::to_string(&s.sites).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schedules (id, start_hour, end_hour, sites, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![s.id, s.start_hour, s.end_hour, sites_json, s.created_at],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Block exactly the union of the global blocks, the running session's sites and every scheduled rule
+/// whose window covers `hour`. Writes only when the file would actually change, so the periodic tick is
+/// free and never asks for a password it does not need.
+#[tauri::command]
+fn sync_blocks(
+    handle: tauri::AppHandle,
+    hour: i64,
+    session_sites: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let conn = get_conn(&handle)?;
+    let schedules = read_schedules(&conn)?;
+    let active_ids: Vec<String> = schedules
+        .iter()
+        .filter(|s| schedule_is_active(s, hour))
+        .map(|s| s.id.clone())
+        .collect();
+
+    let mut wanted = read_global_blocks(&conn)?;
+    wanted.extend(session_sites);
+    wanted.extend(active_schedule_sites(&schedules, hour));
+    let domains = expand_sites(wanted);
+
+    // Build the file in memory and compare: if it already says this, there is nothing to do
+    let current = read_hosts_content()?;
+    let mut new_content = strip_existing_block(&current);
+    if !new_content.ends_with('\n') && !new_content.is_empty() {
+        new_content.push('\n');
+    }
+    new_content.push_str(&build_block_section(&domains));
+
+    let changed = new_content != current;
+    if changed {
+        write_hosts_privileged(&new_content, &domains)?;
+        flush_dns();
+    }
+    Ok(serde_json::json!({
+        "changed": changed,
+        "blocked": domains.len(),
+        "activeRuleIds": active_ids,
+    }))
 }
 
 #[tauri::command]
@@ -979,6 +1135,9 @@ pub fn run() {
             sync_todos,
             get_global_blocks,
             set_global_blocks,
+            get_schedules,
+            save_schedules,
+            sync_blocks,
             get_active_session,
             save_active_session,
             clear_active_session

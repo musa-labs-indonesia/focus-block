@@ -10,6 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - macOS `.dmg` built in CI as a universal binary (Apple Silicon + Intel).
+- Scheduled blocks: up to two non-overlapping daily hour windows, each with its own domains, enforced while the app is open.
 - Ad-hoc signing for the macOS bundle, so Gatekeeper says "unidentified developer" instead of "damaged".
 - Uninstall hooks (deb/rpm) remove the helper and the sudoers rule; AppImage has no hook, so there it is manual.
 - CI refuses a release whose tag does not match the packaged version.
