@@ -476,9 +476,21 @@ export default function App() {
       if (r <= 0) {
         // finished
         if (intervalRef.current) window.clearInterval(intervalRef.current);
-        // deactivate blocks
-        invoke("deactivate_blocks")
-          .then(() => setToast(`✓ "${activeTodo?.title || "Task"}" is complete. Blocks cleared.`))
+        // The same writer that opened the session closes it: sync_blocks recomputes the union without
+        // this session, so a scheduled window that is open right now keeps its domains instead of being
+        // wiped by a blind clear, and the toast reports what was actually written.
+        invoke<{ changed: boolean; blocked: number; activeRuleIds: string[] }>("sync_blocks", {
+          hour: new Date().getHours(),
+          sessionSites: [],
+        })
+          .then((res) => {
+            setActiveRuleIds(res.activeRuleIds);
+            setToast(
+              res.blocked === 0
+                ? `✓ "${activeTodo?.title || "Task"}" is complete. Blocks cleared.`
+                : `✓ "${activeTodo?.title || "Task"}" is complete. ${res.blocked} site(s) still blocked by a scheduled window.`,
+            );
+          })
           .catch((e) => setToast(`Session ended, but blocks were not cleared: ${String(e).slice(0, 120)}`));
         setTimeout(() => refreshBlockStatus(), 300);
         setTimeout(() => setToast(null), 4000);
@@ -494,14 +506,21 @@ export default function App() {
   useEffect(() => {
     if (!active) return;
     let unlisten: (() => void) | undefined;
-    getCurrentWindow()
-      .onCloseRequested((event) => {
-        // rust also prevents, this is for toast UX
-        event.preventDefault();
-        showToast("Cannot close — session running. Timer must finish. No pause, no escape.");
-      })
-      .then((fn) => (unlisten = fn))
-      .catch(() => {});
+    try {
+      getCurrentWindow()
+        .onCloseRequested((event) => {
+          // rust also prevents, this is for toast UX
+          event.preventDefault();
+          showToast("Cannot close — session running. Timer must finish. No pause, no escape.");
+        })
+        .then((fn) => (unlisten = fn))
+        .catch(() => {});
+    } catch {
+      // `npm run dev` in a plain browser has no native window, and this call throws synchronously when
+      // it is missing — inside an effect, so it took the whole tree down with it. The rust close handler
+      // is the real guard; this listener only adds the toast.
+      return;
+    }
     return () => {
       if (unlisten) unlisten();
     };
@@ -712,14 +731,21 @@ export default function App() {
       return;
     }
     const merged = Array.from(new Set([...globalBlocks, ...todo.blockedSites]));
-    // activate blocks — abort if auth rejected (no block = no session)
+    // sync_blocks is the only writer: it unions globals, this task's domains and every open scheduled
+    // window, so starting a session adds to a window's block instead of replacing it. It also skips the
+    // privileged write when the file already says this, so a start that changes nothing costs nothing.
+    // No block = no session: a rejected write, or a list where nothing survives validation, aborts.
     try {
-      if (merged.length > 0) {
-        await invoke("activate_blocks", { sites: merged });
-        await refreshBlockStatus();
-      } else {
-        await invoke("deactivate_blocks").catch(() => {});
+      const res = await invoke<{ changed: boolean; blocked: number; activeRuleIds: string[] }>("sync_blocks", {
+        hour: new Date().getHours(),
+        sessionSites: merged,
+      });
+      setActiveRuleIds(res.activeRuleIds);
+      if (merged.length > 0 && res.blocked === 0) {
+        showToast("Nothing in that list is a usable domain — session not started");
+        return;
       }
+      await refreshBlockStatus();
     } catch (err: any) {
       const msg = typeof err === "string" ? err : JSON.stringify(err);
       showToast(`Blocking failed: ${msg.slice(0, 180)} — session not started`);

@@ -44,6 +44,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Starting or ending a session rewrote `/etc/hosts` from its own domain list, which briefly dropped an open scheduled window's domains; both paths now go through the same union writer.
 - macOS: the DNS flush runs inside the admin prompt, where it has the permission it needs.
 - `activate_blocks` errors out instead of silently starting a session that blocks nothing.
 - The finish toast only claims blocks were cleared when the clear actually succeeded.
