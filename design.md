@@ -88,7 +88,8 @@ Views use named tokens or Tailwind's spacing utilities — never raw pixel value
 
 - Buttons: two shapes only. **Primary** = solid accent, no border. **Secondary** = paper background
   with a hairline border. Same height (44px minimum), same radius (`--radius-md`), same tracking.
-- Chips: hairline + a small dot, never a filled red pill. A blocked domain is not an error state.
+- Chips: hairline only. A domain is data, not a state — dots are reserved for status, so a chip never
+  carries one and a cloud of eight domains does not become a field of dots.
 - Status: a word plus one dot. No emoji anywhere — emoji render differently on every OS, which is
   exactly what a cross-platform desktop tool cannot afford.
 - Icons: hand-drawn 16px inline SVG, `currentColor`, no icon dependency.

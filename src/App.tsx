@@ -668,8 +668,8 @@ export default function App() {
             setActiveRuleIds(res.activeRuleIds);
             setToast(
               res.blocked === 0
-                ? `✓ "${activeTodo?.title || "Task"}" is complete. Blocks cleared.`
-                : `✓ "${activeTodo?.title || "Task"}" is complete. ${res.blocked} ${res.blocked === 1 ? "site" : "sites"} still blocked by a scheduled window.`,
+                ? `“${activeTodo?.title || "Task"}” is complete. Blocks cleared.`
+                : `“${activeTodo?.title || "Task"}” is complete. ${res.blocked} ${res.blocked === 1 ? "site" : "sites"} still blocked by a scheduled window.`,
             );
           })
           .catch((e) => setToast(`Session ended, but blocks were not cleared: ${String(e).slice(0, 120)}`));
@@ -943,7 +943,7 @@ export default function App() {
     };
     setActive(sess);
     setRemaining(durationSec);
-    showToast(`Started "${todo.title}" for ${todo.durationMinutes} minutes. Controls are locked until it ends.`);
+    showToast(`Started “${todo.title}” for ${todo.durationMinutes} minutes. Controls are locked until it ends.`);
   }
 
   const filteredTodos = todos.filter((t) => {
@@ -1024,12 +1024,12 @@ export default function App() {
         {/* The instrument: expanded while a session runs, one quiet line when idle */}
         {active && activeTodo ? (
           <section
-            className="mt-6 overflow-hidden rounded-md border border-l-2 border-rule border-l-accent bg-paper-2"
+            className="mt-6 overflow-hidden rounded-md bg-paper-3"
             aria-labelledby="active-session-heading"
           >
             <div className="flex flex-wrap items-start justify-between gap-6 p-6">
               <div className="min-w-0 space-y-3">
-                <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-ink-2">
+                <p className="flex items-center gap-2 text-xs font-medium text-ink-2">
                   <StatusDot tone="accent" /> Running
                 </p>
                 <h3 id="active-session-heading" className="truncate text-xl font-semibold">
@@ -1050,16 +1050,13 @@ export default function App() {
                   <p className="text-xs text-ink-3">This task has no domains of its own, so nothing is blocked while it runs.</p>
                 )}
               </div>
-              <div className="flex flex-col items-end gap-1">
-                <div
-                  className="timer-digits text-timer leading-none"
-                  role="timer"
-                  aria-label={`${formatTime(remaining)} remaining`}
-                  aria-live="off"
-                >
-                  {formatTime(remaining)}
-                </div>
-                <p className="text-xs uppercase tracking-[0.14em] text-ink-3">remaining</p>
+              <div
+                className="timer-digits text-timer leading-none"
+                role="timer"
+                aria-label={`${formatTime(remaining)} remaining`}
+                aria-live="off"
+              >
+                {formatTime(remaining)}
               </div>
             </div>
             <div
@@ -1070,7 +1067,7 @@ export default function App() {
               aria-valuemax={100}
               aria-valuenow={Math.round(progress)}
             >
-              <div className="h-full bg-accent transition-[width] duration-1000 ease-linear" style={{ width: `${progress}%` }} />
+              <div className="h-full w-full origin-left bg-accent transition-transform duration-1000 ease-linear" style={{ transform: `scaleX(${progress / 100})` }} />
             </div>
           </section>
         ) : (
@@ -1267,7 +1264,8 @@ export default function App() {
                     </Info>
                   </p>
                   {savedAuth?.helper_version === 1 && (
-                    <p className="border-l-2 border-warn pl-3 text-sm text-warn">
+                    <p className="flex items-start gap-2 text-sm text-warn">
+                      <Icon name="alert" className="mt-0.5" />
                       An older version of Focus Block installed this. Press Enable to replace it — one password.
                     </p>
                   )}
@@ -1297,12 +1295,17 @@ export default function App() {
                     Up to {MAX_SCHEDULES} windows a day. While one is open, its sites and your global list are
                     blocked. They cannot overlap.
                   </p>
-                  {scheduleError && <p role="alert" className="border-l-2 border-danger pl-3 text-sm text-danger">{scheduleError}</p>}
+                  {scheduleError && (
+                    <p role="alert" className="flex items-start gap-2 text-sm text-danger">
+                      <Icon name="alert" className="mt-0.5" />
+                      {scheduleError}
+                    </p>
+                  )}
                   <div className="space-y-5">
                     {schedules.map((rule) => {
                       const blockedNow = activeRuleIds.includes(rule.id);
                       return (
-                        <div key={rule.id} className={`space-y-3 border-l-2 pl-3 ${blockedNow ? "border-accent" : "border-rule"}`}>
+                        <div key={rule.id} className="space-y-3 border-t border-rule pt-3">
                           <div className="flex flex-wrap items-center gap-2">
                             <label htmlFor={`start-${rule.id}`} className="sr-only">Start hour</label>
                             <select id={`start-${rule.id}`} value={rule.startHour} onChange={(e) => updateRule(rule.id, { startHour: Number(e.target.value) })} className="tabular rounded-md border border-rule-2 bg-paper px-2 py-2 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent">
