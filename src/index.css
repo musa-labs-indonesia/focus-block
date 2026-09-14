@@ -3,6 +3,7 @@
 @custom-variant dark (&:is(.dark *));
 
 /* Base layer only: the token set and its Tailwind registration live in ../tokens.css. */
+
 html {
   background: var(--t-paper);
   color-scheme: light;
@@ -22,7 +23,12 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Display type is the app's voice: roman only, tight tracking. */
+/* Display type is the app's voice: roman only, tight tracking.
+ *
+ * NO `margin: 0` here, deliberately. This rule is unlayered, so it outranks Tailwind's layered utilities
+ * in the cascade — and a margin reset here silently beat every `space-y-*` gap that follows a heading,
+ * which is how the space between a section rule and its paragraph went missing. Tailwind's own preflight
+ * already resets margins, in a layer, where utilities can still override it. */
 h1,
 h2,
 h3,
@@ -30,7 +36,6 @@ h4 {
   font-family: var(--t-font-display);
   font-style: normal;
   letter-spacing: -0.02em;
-  margin: 0;
 }
 
 :focus-visible {
