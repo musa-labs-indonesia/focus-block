@@ -983,6 +983,36 @@ fn read_global_blocks(conn: &rusqlite::Connection) -> Result<Vec<String>, String
     Ok(out)
 }
 
+/// Whether a session is running right now, by the same test the close guard uses.
+fn session_is_running(conn: &rusqlite::Connection) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    conn.query_row("SELECT end_at FROM active_session LIMIT 1", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|end| end > now)
+    .unwrap_or(false)
+}
+
+/// While a session runs, the global list may only **grow**.
+///
+/// An addition makes the block stricter, so it cannot be a way out of a session; removing one would weaken
+/// a session the user has committed to, so it waits until the timer ends. Pure, so the policy is testable
+/// without a database — and enforced here rather than only in the UI, which is cosmetic.
+fn check_global_change(stored: &[String], proposed: &[String], session_running: bool) -> Result<(), String> {
+    if !session_running {
+        return Ok(());
+    }
+    match stored.iter().find(|site| !proposed.contains(site)) {
+        Some(site) => Err(format!(
+            "{site} is blocked for the rest of this session — removing it waits until the timer ends"
+        )),
+        None => Ok(()),
+    }
+}
+
 fn read_schedules(conn: &rusqlite::Connection) -> Result<Vec<Schedule>, String> {
     let mut stmt = conn
         .prepare("SELECT id, start_hour, end_hour, sites, created_at FROM schedules ORDER BY start_hour")
@@ -1015,6 +1045,9 @@ fn get_global_blocks(handle: tauri::AppHandle) -> Result<Vec<String>, String> {
 #[tauri::command]
 fn set_global_blocks(handle: tauri::AppHandle, sites: Vec<String>) -> Result<(), String> {
     let mut conn = get_conn(&handle)?;
+    // additions are always fine; a removal waits for the session to end
+    let stored = read_global_blocks(&conn)?;
+    check_global_change(&stored, &sites, session_is_running(&conn))?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM global_blocks", [])
         .map_err(|e| e.to_string())?;
@@ -1454,6 +1487,25 @@ mod tests {
         both.sort();
         both.dedup();
         assert_eq!(both, vec!["reddit.com", "x.com", "youtube.com"]);
+    }
+
+    #[test]
+    fn a_session_can_gain_global_blocks_but_not_lose_them() {
+        let stored: Vec<String> = vec!["reddit.com".into(), "x.com".into()];
+        let to = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // no session: anything goes, including clearing the list
+        assert!(check_global_change(&stored, &[], false).is_ok());
+
+        // a session: adding is fine, in any order — it only makes the block stricter
+        assert!(check_global_change(&stored, &to(&["reddit.com", "x.com", "youtube.com"]), true).is_ok());
+        assert!(check_global_change(&stored, &to(&["x.com", "reddit.com"]), true).is_ok());
+        assert!(check_global_change(&to(&[]), &to(&["youtube.com"]), true).is_ok());
+
+        // a session: dropping one is refused, and the message names the site
+        let err = check_global_change(&stored, &to(&["reddit.com"]), true).unwrap_err();
+        assert!(err.starts_with("x.com "), "unexpected message: {err}");
+        assert!(check_global_change(&stored, &[], true).is_err());
     }
 
     #[test]

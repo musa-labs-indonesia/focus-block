@@ -477,10 +477,12 @@ export default function App() {
   }, [todos, dbLoaded]);
   useEffect(() => {
     if (!dbLoaded) return;
-    invoke("set_global_blocks", { sites: globalBlocks }).catch(() => {
+    invoke("set_global_blocks", { sites: globalBlocks }).catch((e) => {
       try {
         localStorage.setItem(STORAGE_GLOBAL, JSON.stringify(globalBlocks));
       } catch {}
+      // outside Tauri this always fails (an Error, not a string); a string means the backend refused it
+      if (typeof e === "string" && e.length > 0) showToast(e.slice(0, 160));
     });
   }, [globalBlocks, dbLoaded]);
   useEffect(() => {
@@ -770,18 +772,15 @@ export default function App() {
       showToast("That domain is already blocked globally.");
       return;
     }
-    if (active) {
-      setGlobalError("Global blocks cannot change while a session runs.");
-      showToast("You cannot change blocked domains during a session.");
-      return;
-    }
+    // Adding is allowed mid-session on purpose: it only makes the block stricter, so it cannot be a way
+    // out of one. Removing is refused in removeGlobalSite, and again by the backend.
     setGlobalBlocks((p) => [...p, n]);
     setGlobalInput("");
     setGlobalError(null);
   }
   function removeGlobalSite(s: string) {
     if (active) {
-      showToast("You cannot change blocked domains during a session.");
+      showToast(`${s} is blocked for the rest of this session — removing it waits until the timer ends.`);
       return;
     }
     setGlobalBlocks((p) => p.filter((x) => x !== s));
@@ -1274,12 +1273,14 @@ export default function App() {
                 <div className="flex flex-wrap items-start gap-2">
                   <div className="min-w-0 flex-1">
                     <label htmlFor="global-site" className="sr-only">Site to block everywhere</label>
-                    <input id="global-site" name="global-site" type="text" autoComplete="off" value={globalInput} onChange={(e) => { setGlobalInput(e.target.value); setGlobalError(null); }} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addGlobalSite())} placeholder="youtube.com" disabled={!!active} aria-invalid={globalError ? "true" : undefined} aria-describedby={globalError ? "global-site-error" : undefined} className="w-full rounded-md border border-rule-2 bg-paper px-3 py-2.5 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-ink-3 focus:border-accent disabled:opacity-45" />
+                    <input id="global-site" name="global-site" type="text" autoComplete="off" value={globalInput} onChange={(e) => { setGlobalInput(e.target.value); setGlobalError(null); }} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addGlobalSite())} placeholder="youtube.com" aria-invalid={globalError ? "true" : undefined} aria-describedby={globalError ? "global-site-error" : undefined} className="w-full rounded-md border border-rule-2 bg-paper px-3 py-2.5 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-ink-3 focus:border-accent disabled:opacity-45" />
                     {globalError && <p id="global-site-error" role="alert" className="mt-1.5 text-xs text-danger">{globalError}</p>}
                   </div>
-                  <Button variant="secondary" onClick={addGlobalSite} disabled={!!active}>Add</Button>
+                  <Button variant="secondary" onClick={addGlobalSite}>Add</Button>
                 </div>
-                {active && <p className="text-xs text-ink-3">Locked while a session runs.</p>}
+                {active && (
+                  <p className="text-xs text-ink-3">You can add while a session runs. Removing waits until it ends.</p>
+                )}
                 <div className="flex flex-wrap items-center gap-1.5">
                   {globalBlocks.length === 0 ? (
                     <span className="text-sm text-ink-3">Nothing is blocked everywhere yet.</span>
@@ -1292,6 +1293,7 @@ export default function App() {
                           onClick={() => removeGlobalSite(s)}
                           disabled={!!active}
                           aria-label={`Remove ${s} from the global list`}
+                          title={active ? "Removing waits until the session ends" : `Remove ${s}`}
                           className="compact-hit grid place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-danger disabled:opacity-45"
                         >
                           <Icon name="close" className="h-3 w-3" />
