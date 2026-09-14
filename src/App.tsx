@@ -197,7 +197,7 @@ function Info({ label, children }: { label: string; children: React.ReactNode })
 /** A hairline rule with a small caps label — the only section divider in the app. */
 function SectionLabel({ children, id }: { children: React.ReactNode; id?: string }) {
   return (
-    <h3 id={id} className="border-b border-rule pb-2 text-xs font-semibold uppercase tracking-[0.14em] text-ink-3">
+    <h3 id={id} className="border-b border-rule pb-3 text-xs font-semibold uppercase tracking-[0.14em] text-ink-3">
       {children}
     </h3>
   );
@@ -299,6 +299,9 @@ export default function App() {
   const [formSiteInput, setFormSiteInput] = useState("");
   const [formError, setFormError] = useState<FormError | null>(null);
   const [globalError, setGlobalError] = useState<string | null>(null);
+  // Sites the app wants blocked but cannot write without a password: reported in a banner instead of
+  // being prompted for on a timer. `null` = nothing pending, `0` = a clear is pending.
+  const [pendingSites, setPendingSites] = useState<number | null>(null);
 
   const appContentRef = useRef<HTMLDivElement>(null);
   const modalRef = useRef<HTMLFormElement>(null);
@@ -501,13 +504,18 @@ export default function App() {
     let cancelled = false;
     async function sync() {
       try {
+        // A tick never prompts. Without saved authorization it only *reports* what a write would change
+        // and the banner below offers one click; with it, the write happens silently as before.
+        const quiet = savedAuth?.enabled === true;
         const res = await invoke<{ changed: boolean; blocked: number; activeRuleIds: string[] }>("sync_blocks", {
           hour: new Date().getHours(),
           sessionSites: sessionSitesRef.current,
+          dryRun: !quiet,
         });
         if (cancelled) return;
         setActiveRuleIds(res.activeRuleIds);
-        if (res.changed) {
+        setPendingSites(!quiet && res.changed ? res.blocked : null);
+        if (res.changed && quiet) {
           await refreshBlockStatus();
           await refreshHostsPreview();
         }
@@ -519,7 +527,26 @@ export default function App() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [dbLoaded, schedules, globalBlocks, active]);
+  }, [dbLoaded, schedules, globalBlocks, active, savedAuth?.enabled]);
+
+  /** The one write that is allowed to ask: the user pressed a button that says so. */
+  async function applyPending() {
+    try {
+      const res = await invoke<{ changed: boolean; blocked: number; activeRuleIds: string[] }>("sync_blocks", {
+        hour: new Date().getHours(),
+        sessionSites: sessionSitesRef.current,
+        dryRun: false,
+      });
+      setActiveRuleIds(res.activeRuleIds);
+      setPendingSites(null);
+      await refreshBlockStatus();
+      await refreshHostsPreview();
+      showToast(res.blocked === 0 ? "Blocks cleared." : `Blocking ${res.blocked} ${res.blocked === 1 ? "site" : "sites"}.`);
+    } catch (e: any) {
+      // a refused password leaves the banner in place; nothing retries on its own
+      showToast(`Could not apply the block: ${String(e).slice(0, 120)}`);
+    }
+  }
   useEffect(() => {
     if (!dbLoaded) return;
     if (active)
@@ -553,18 +580,23 @@ export default function App() {
           // recompute what should be blocked rather than assuming nothing should be: a scheduled window
           // may legitimately be running right now, in which case the block is not an orphan
           try {
+            const quiet = savedAuth?.enabled === true;
             const res = await invoke<{ changed: boolean; blocked: number }>("sync_blocks", {
               hour: new Date().getHours(),
               sessionSites: [],
+              dryRun: !quiet,
             });
-            await refreshBlockStatus();
-            await refreshHostsPreview();
-            if (res.changed) {
+            if (res.changed && quiet) {
+              await refreshBlockStatus();
+              await refreshHostsPreview();
               showToast(
                 res.blocked === 0
                   ? "Leftover block from a previous session cleared"
                   : `A scheduled window is still holding ${res.blocked} ${res.blocked === 1 ? "site" : "sites"}`,
               );
+            } else if (res.changed) {
+              // cleaning up needs a password, so leave it to the banner rather than prompting here
+              setPendingSites(res.blocked);
             }
           } catch (e: any) {
             showToast(`Could not clean up the leftover block: ${String(e).slice(0, 120)} — clear manually in Settings`);
@@ -1087,6 +1119,21 @@ export default function App() {
           </section>
         )}
 
+        {/* A write that needs a password waits here for one click. Nothing on a timer prompts. */}
+        {pendingSites !== null && (
+          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-md bg-warn-paper px-4 py-3 text-sm text-warn">
+            <Icon name="alert" />
+            <span>
+              {pendingSites === 0
+                ? "Focus Block needs your password to clear the remaining block."
+                : `Focus Block needs your password to block ${pendingSites} ${pendingSites === 1 ? "site" : "sites"} now.`}
+            </span>
+            <Button variant="secondary" className="ml-auto" onClick={applyPending}>
+              Apply
+            </Button>
+          </div>
+        )}
+
         {page === "focus" ? (
           <>
             {/* Search */}
@@ -1363,7 +1410,7 @@ export default function App() {
                   </div>
                   <p className="text-xs text-ink-3">
                     A window applies while Focus Block is open — closing the app releases it.
-                    {savedAuth && !savedAuth.enabled && " Without authorization, opening and closing a window each asks for a password."}
+                    {savedAuth && !savedAuth.enabled && " Without authorization, a change it needs waits for you to press Apply — one password."}
                   </p>
                 </section>
 

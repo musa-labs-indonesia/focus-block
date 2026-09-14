@@ -55,9 +55,11 @@
     "category": "Productivity",
     "linux": {
       "deb": {
+        "postInstallScript": "linux/postinstall.sh",
         "postRemoveScript": "linux/postremove.sh"
       },
       "rpm": {
+        "postInstallScript": "linux/postinstall.sh",
         "postRemoveScript": "linux/postremove.sh"
       }
     },

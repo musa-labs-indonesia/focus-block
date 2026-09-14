@@ -47,6 +47,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Opening the app asked for a password, and asked again every 30 seconds if it was refused: global blocks now apply while a session or a scheduled window runs, not the whole time the app is open.
+- A write that needs a password is never retried on a timer — it waits for an Apply button, so nothing prompts on its own.
+- The `.deb` refreshes the icon and desktop databases on install, so the launcher gets its icon without a re-login.
 - Starting or ending a session rewrote `/etc/hosts` from its own domain list, which briefly dropped an open scheduled window's domains; both paths now go through the same union writer.
 - macOS: the DNS flush runs inside the admin prompt, where it has the permission it needs.
 - `activate_blocks` errors out instead of silently starting a session that blocks nothing.

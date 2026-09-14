@@ -196,6 +196,22 @@ fn active_schedule_sites(schedules: &[Schedule], hour: i64) -> Vec<String> {
         .collect()
 }
 
+/// What should be blocked right now: the list a running session handed over, plus — while a scheduled
+/// window is open — that window's sites and the global list.
+///
+/// Globals are deliberately *not* added on their own. They belong to a session or an open window, not
+/// to the app merely being open. Adding them unconditionally made a fresh launch decide the block was
+/// out of date, which meant a password prompt with no user action behind it — and the same prompt
+/// again on every tick once it was refused.
+fn wanted_domains(globals: Vec<String>, session_sites: Vec<String>, window_sites: Vec<String>) -> Vec<String> {
+    let mut wanted = session_sites;
+    if !window_sites.is_empty() {
+        wanted.extend(globals);
+        wanted.extend(window_sites);
+    }
+    wanted
+}
+
 fn expand_sites(sites: Vec<String>) -> Vec<String> {
     let mut uniq = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -1029,6 +1045,7 @@ fn sync_blocks(
     handle: tauri::AppHandle,
     hour: i64,
     session_sites: Vec<String>,
+    dry_run: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let conn = get_conn(&handle)?;
     let schedules = read_schedules(&conn)?;
@@ -1038,10 +1055,8 @@ fn sync_blocks(
         .map(|s| s.id.clone())
         .collect();
 
-    let mut wanted = read_global_blocks(&conn)?;
-    wanted.extend(session_sites);
-    wanted.extend(active_schedule_sites(&schedules, hour));
-    let domains = expand_sites(wanted);
+    let window_sites = active_schedule_sites(&schedules, hour);
+    let domains = expand_sites(wanted_domains(read_global_blocks(&conn)?, session_sites, window_sites));
 
     // Build the file in memory and compare: if it already says this, there is nothing to do
     let current = read_hosts_content()?;
@@ -1052,7 +1067,9 @@ fn sync_blocks(
     new_content.push_str(&build_block_section(&domains));
 
     let changed = new_content != current;
-    if changed {
+    // A dry run reports what a write would do without asking anybody for a password, so a caller that
+    // cannot write unattended can offer one click instead of prompting on every tick.
+    if changed && !dry_run.unwrap_or(false) {
         write_hosts_privileged(&new_content, &domains)?;
         flush_dns();
     }
@@ -1372,6 +1389,51 @@ mod tests {
         assert_eq!(active_schedule_sites(&rules, 8), vec!["x.com", "y.com"]);
         assert_eq!(active_schedule_sites(&rules, 20), vec!["z.com"]);
         assert!(active_schedule_sites(&rules, 12).is_empty());
+    }
+
+    #[test]
+    fn nothing_is_blocked_just_because_the_app_is_open() {
+        // The regression this exists for: the global list used to be added unconditionally, so opening
+        // the app decided /etc/hosts was out of date and asked for a password before the user had done
+        // anything — then asked again on every 30s tick that was refused.
+        let domains = expand_sites(wanted_domains(
+            vec!["mangadex.org".into(), "x.com".into()],
+            vec![],
+            vec![],
+        ));
+        assert!(domains.is_empty(), "opening the app must not want to block anything");
+
+        // and the writer would find nothing to change, which is what decides whether a write happens
+        let stock = "127.0.0.1 localhost\n";
+        let mut new_content = strip_existing_block(stock);
+        if !new_content.ends_with('\n') && !new_content.is_empty() {
+            new_content.push('\n');
+        }
+        new_content.push_str(&build_block_section(&domains));
+        assert_eq!(new_content, stock, "a fresh launch has nothing to write");
+    }
+
+    #[test]
+    fn a_session_brings_its_list_and_a_window_brings_the_globals_too() {
+        let globals = vec!["reddit.com".to_string()];
+
+        // the frontend merges the global list into a running session's list, so it passes through
+        assert_eq!(
+            wanted_domains(globals.clone(), vec!["reddit.com".into(), "x.com".into()], vec![]),
+            vec!["reddit.com", "x.com"]
+        );
+
+        // a window has no session behind it, so its own sites and the globals are both added
+        assert_eq!(
+            wanted_domains(globals.clone(), vec![], vec!["youtube.com".into()]),
+            vec!["reddit.com", "youtube.com"]
+        );
+
+        // a window open during a session: union of both, with the duplicate left for expand_sites to drop
+        let mut both = wanted_domains(globals, vec!["reddit.com".into(), "x.com".into()], vec!["youtube.com".into()]);
+        both.sort();
+        both.dedup();
+        assert_eq!(both, vec!["reddit.com", "x.com", "youtube.com"]);
     }
 
     // ── what gets handed to root ────────────────────────────────────────────────────────────────
