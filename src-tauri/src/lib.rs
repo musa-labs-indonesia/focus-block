@@ -420,7 +420,7 @@ fn render_command(args: &[String]) -> String {
 /// AppleScript string literal: backslash first, then quote, then newlines. The last one matters: the
 /// renderer is multi-line, and this way correctness does not depend on AppleScript preserving literal
 /// line breaks inside a string — it turns them into its own \n escape, which it parses back to LF.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn apple_escape(text: &str) -> String {
     text.replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -430,7 +430,7 @@ fn apple_escape(text: &str) -> String {
 /// Windows has no sh, so the same shape is expressed in PowerShell: strip, render, swap, flush. It
 /// carries only validated domain characters and is handed over base64/UTF-16LE, so there is no quoting
 /// layer left to escape out of.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn windows_render_script(args: &[String]) -> String {
     let list = args[1..]
         .iter()
@@ -485,7 +485,7 @@ ipconfig /flushdns | Out-Null
 }
 
 /// base64 of UTF-16LE, which is what `powershell -EncodedCommand` expects.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn base64_utf16le(text: &str) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
@@ -1117,7 +1117,7 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            // ensure db exists on startup (ponytail: WAL + 3 tables, no migration yet)
+            // ensure db exists on startup (ponytail: WAL + 4 tables, no migration yet)
             let handle = app.handle().clone();
             let _ = get_conn(&handle);
             Ok(())
@@ -1175,4 +1175,541 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schedule(id: &str, start_hour: i64, end_hour: i64, sites: &[&str]) -> Schedule {
+        Schedule {
+            id: id.to_string(),
+            start_hour,
+            end_hour,
+            sites: sites.iter().map(|s| s.to_string()).collect(),
+            created_at: 0,
+        }
+    }
+
+    // ── domain names ────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_drops_the_noise_a_person_pastes() {
+        assert_eq!(
+            normalize_domain("  HTTPS://WWW.YouTube.com/watch?v=x  ").as_deref(),
+            Some("youtube.com")
+        );
+        assert_eq!(normalize_domain("x.com:443").as_deref(), Some("x.com"));
+        assert_eq!(normalize_domain("x.com.").as_deref(), Some("x.com"));
+        assert_eq!(normalize_domain("www.x.com").as_deref(), Some("x.com"));
+        assert_eq!(normalize_domain("sub.x.com").as_deref(), Some("sub.x.com"));
+
+        for junk in ["", "   ", "notadomain", ".", "..", "a b.com", "a;b.com", "a$b.com", "*.com", "例え.jp"] {
+            assert_eq!(normalize_domain(junk), None, "{junk:?} should not be a domain");
+        }
+    }
+
+    /// The invariant the whole privilege design rests on: a name is handed to root as a name, so
+    /// nothing it can contain may end the hosts line or start a new directive.
+    #[test]
+    fn nothing_that_survives_normalization_can_break_out_of_a_hosts_line() {
+        let hostile = [
+            "a.com",
+            "a;rm -rf /.com",
+            "a\n127.0.0.1 evil.com",
+            "a\rb.com",
+            "a\tb.com",
+            "a b.com",
+            "a#comment.com",
+            "a/b.com",
+            "a\\b.com",
+            "a\"b.com",
+            "a'b.com",
+            "a`id`.com",
+            "a$(id).com",
+            "a|b.com",
+            "a&&b.com",
+            "a..b.com",
+            "a-.com",
+        ];
+        for raw in hostile {
+            if let Some(domain) = normalize_domain(raw) {
+                assert!(!domain.is_empty(), "{raw:?} produced an empty name");
+                assert!(
+                    domain
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'),
+                    "{raw:?} produced {domain:?}"
+                );
+                assert!(
+                    !domain.chars().any(|c| " \t\r\n#;\\/:\"'`$|&><()".contains(c)),
+                    "{raw:?} produced {domain:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aliases_expand_and_www_is_only_added_to_two_label_names() {
+        assert_eq!(
+            expand_sites(vec!["youtube.com".into()]),
+            vec![
+                "youtube.com",
+                "www.youtube.com",
+                "youtu.be",
+                "www.youtu.be",
+                "m.youtube.com",
+                "youtube-nocookie.com",
+                "www.youtube-nocookie.com",
+            ]
+        );
+        // asking for an alias and for the site it points at is the same request
+        assert_eq!(
+            expand_sites(vec!["x.com".into()]),
+            expand_sites(vec!["twitter.com".into(), "t.co".into()])
+        );
+        // three labels: `www.m.youtube.com` is not a host anyone visits, so it is not invented
+        assert_eq!(expand_sites(vec!["m.youtube.com".into()]), vec!["m.youtube.com"]);
+        assert!(expand_sites(vec!["nope".into(), "  ".into(), "bad name.com".into()]).is_empty());
+    }
+
+    // ── the managed section ─────────────────────────────────────────────────────────────────────
+
+    const STOCK: &str = "127.0.0.1 localhost\n# my own comment\n10.0.0.1 keep.me\n";
+    const STOCK_WITH_LEGACY: &str =
+        "127.0.0.1 localhost\n# my own comment\n# BEGIN BLOCKER2\n127.0.0.1 stale.com\n# END BLOCKER2\n10.0.0.1 keep.me\n";
+
+    #[test]
+    fn the_section_lists_both_families_once_per_domain() {
+        let section = build_block_section(&["a.com".into(), "b.com".into()]);
+        assert!(section.starts_with(MARKER_START));
+        assert!(section.ends_with(&format!("{MARKER_END}\n")));
+        for d in ["a.com", "b.com"] {
+            assert_eq!(section.matches(&format!("127.0.0.1 {d}\n")).count(), 1, "{d}");
+            assert_eq!(section.matches(&format!("::1 {d}\n")).count(), 1, "{d}");
+        }
+        // no domains, no section: an empty block would still mark the file as managed
+        assert_eq!(build_block_section(&[]), "");
+    }
+
+    #[test]
+    fn rebuilding_the_same_block_is_a_no_op() {
+        // every write is strip-then-render, and the app skips the privileged write when the result is
+        // byte for byte what is already on disk, so a repeat has to be identical
+        let once = format!("{STOCK}{}", build_block_section(&["a.com".into()]));
+        let twice = format!(
+            "{}{}",
+            strip_existing_block(&once),
+            build_block_section(&["a.com".into()])
+        );
+        assert_eq!(once, twice);
+        assert_eq!(strip_existing_block(&once), STOCK);
+    }
+
+    #[test]
+    fn stripping_leaves_every_other_line_alone() {
+        assert!(is_block_active(STOCK_WITH_LEGACY));
+        assert!(!is_block_active(STOCK));
+        // 0.1.1's markers go too, so an upgrade cleans up after itself
+        assert_eq!(strip_existing_block(STOCK_WITH_LEGACY), STOCK);
+        // markers are matched with surrounding whitespace, like the awk in the shell renderer
+        assert_eq!(
+            strip_existing_block("  # BEGIN FOCUSBLOCKER\nx\n\t# END FOCUSBLOCKER  \nkeep\n"),
+            "keep\n"
+        );
+    }
+
+    // ── schedules ───────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_window_runs_from_its_start_hour_up_to_its_end_hour() {
+        let rule = schedule("a", 7, 10, &[]);
+        // 7 to 10 covers 07:00 through 09:59; 10:00 is already released
+        for hour in [7, 8, 9] {
+            assert!(schedule_is_active(&rule, hour), "{hour}:00 should be inside 7-10");
+        }
+        for hour in [0, 6, 10, 11, 23] {
+            assert!(!schedule_is_active(&rule, hour), "{hour}:00 should be outside 7-10");
+        }
+        let all_day = schedule("b", 0, 24, &[]);
+        assert!(schedule_is_active(&all_day, 0));
+        assert!(schedule_is_active(&all_day, 23));
+        assert!(!schedule_is_active(&all_day, 24));
+    }
+
+    #[test]
+    fn invalid_schedules_are_rejected() {
+        assert!(validate_schedules(&[]).is_ok());
+        // touching windows are fine: one releases at 10:00 and the next starts there
+        assert!(validate_schedules(&[schedule("a", 7, 10, &[]), schedule("b", 10, 12, &[])]).is_ok());
+        assert_eq!(
+            validate_schedules(&[schedule("a", 7, 10, &[]), schedule("b", 9, 12, &[])]).unwrap_err(),
+            SCHEDULE_OVERLAP
+        );
+        // contained, not just crossing
+        assert_eq!(
+            validate_schedules(&[schedule("a", 7, 12, &[]), schedule("b", 8, 9, &[])]).unwrap_err(),
+            SCHEDULE_OVERLAP
+        );
+        assert!(validate_schedules(&[schedule("a", 10, 7, &[])]).is_err());
+        assert!(validate_schedules(&[schedule("a", 7, 7, &[])]).is_err());
+        assert!(validate_schedules(&[schedule("a", -1, 7, &[])]).is_err());
+        assert!(validate_schedules(&[schedule("a", 0, 25, &[])]).is_err());
+        let three = vec![
+            schedule("a", 1, 2, &[]),
+            schedule("b", 3, 4, &[]),
+            schedule("c", 5, 6, &[]),
+        ];
+        assert!(validate_schedules(&three).is_err());
+    }
+
+    #[test]
+    fn only_the_windows_covering_now_contribute_sites() {
+        let rules = vec![
+            schedule("morning", 7, 10, &["x.com", "y.com"]),
+            schedule("evening", 19, 22, &["z.com"]),
+        ];
+        assert_eq!(active_schedule_sites(&rules, 8), vec!["x.com", "y.com"]);
+        assert_eq!(active_schedule_sites(&rules, 20), vec!["z.com"]);
+        assert!(active_schedule_sites(&rules, 12).is_empty());
+    }
+
+    // ── what gets handed to root ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_script_is_rendered_with_its_cap_resolved() {
+        let script = render_script();
+        assert!(script.starts_with("#!/bin/sh"));
+        assert!(script.contains(HELPER_V2_MARKER), "the installed helper has to advertise v2");
+        assert!(!script.contains("@MAX_DOMAINS@"), "a token left in would be a syntax error");
+        assert!(script.contains(&format!("MAX_DOMAINS={MAX_DOMAINS}")));
+        assert!(script.contains("mv -f \"$STAGE\" \"$HOSTS\""), "the swap has to stay atomic");
+    }
+
+    #[test]
+    fn helper_arguments_are_a_mode_and_its_names() {
+        assert_eq!(helper_args(&[]), vec!["clear".to_string()]);
+        assert_eq!(
+            helper_args(&["a.com".into()]),
+            vec!["block".to_string(), "a.com".to_string()]
+        );
+        // an empty list must never render as `block` with no names: the helper exits 1 there
+        assert_ne!(helper_args(&[])[0], "block");
+    }
+
+    // ── the renderer the machine actually runs ──────────────────────────────────────────────────
+    // The steps below run the real text the app installs and then hands to root, with its two
+    // absolute paths pointed at a sandbox. Every rewrite is asserted, because a silent miss would
+    // aim `mv` at this machine's own /etc/hosts.
+
+    #[cfg(unix)]
+    mod shell {
+        use super::*;
+        use std::fs;
+        use std::path::PathBuf;
+        use std::process::{Command, Output};
+
+        struct Sandbox {
+            dir: PathBuf,
+            hosts: PathBuf,
+            script: PathBuf,
+        }
+
+        impl Sandbox {
+            fn new(name: &str, hosts_content: &str) -> Sandbox {
+                let dir = std::env::temp_dir().join(format!("focusblock-{}-{name}", std::process::id()));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).expect("sandbox dir");
+                let hosts = dir.join("hosts");
+                fs::write(&hosts, hosts_content).expect("hosts");
+                let script = dir.join("apply.sh");
+
+                let text = render_script()
+                    .replace("HOSTS=/etc/hosts", &format!("HOSTS={}", hosts.display()))
+                    .replace(
+                        "mktemp /etc/.focusblock.hosts.XXXXXX",
+                        &format!("mktemp {}/.focusblock.hosts.XXXXXX", dir.display()),
+                    )
+                    // chown would fail for a non-root test user, and `set -eu` would then abort before
+                    // the swap this test is about. Installing the helper owns that job anyway.
+                    .replace("chown root:root \"$STAGE\"", ": # chown belongs to the installer");
+                // the header comment may still say /etc/hosts in prose; what must not survive is a
+                // rewrite that leaves a *live* path behind, because that is where `mv` would point
+                assert!(
+                    !text.contains("HOSTS=/etc/hosts") && !text.contains("mktemp /etc/"),
+                    "sandbox rewrite missed a live path"
+                );
+                assert!(!text.contains("chown root:root"), "sandbox rewrite missed the chown");
+                fs::write(&script, text).expect("script");
+
+                Sandbox { dir, hosts, script }
+            }
+
+            fn run(&self, args: &[&str]) -> Output {
+                Command::new("sh")
+                    .arg(&self.script)
+                    .args(args)
+                    .output()
+                    .expect("run the renderer")
+            }
+
+            fn hosts(&self) -> String {
+                fs::read_to_string(&self.hosts).expect("read hosts")
+            }
+
+            /// Whatever the script did, no staging file may survive: that is what the trap is for.
+            fn assert_no_leftovers(&self) {
+                let leftovers: Vec<String> = fs::read_dir(&self.dir)
+                    .expect("read sandbox")
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .filter(|n| n.starts_with(".focusblock.hosts."))
+                    .collect();
+                assert!(leftovers.is_empty(), "staging files left behind: {leftovers:?}");
+            }
+        }
+
+        #[test]
+        fn block_rewrites_the_managed_section_and_nothing_else() {
+            let sandbox = Sandbox::new("block", STOCK_WITH_LEGACY);
+            let out = sandbox.run(&["block", "a.com", "b.com"]);
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+
+            let text = sandbox.hosts();
+            assert!(text.contains("127.0.0.1 localhost\n"), "the file's own lines must survive");
+            assert!(text.contains("10.0.0.1 keep.me\n"));
+            assert!(!text.contains("stale.com"), "the 0.1.1 block must be gone");
+            assert_eq!(text.matches(MARKER_START).count(), 1);
+            assert_eq!(text.matches(MARKER_END).count(), 1);
+            assert!(text.find("keep.me").unwrap() < text.find(MARKER_START).unwrap());
+            for d in ["a.com", "b.com"] {
+                assert_eq!(text.matches(&format!("127.0.0.1 {d}\n")).count(), 1, "{d}");
+                assert_eq!(text.matches(&format!("::1 {d}\n")).count(), 1, "{d}");
+            }
+            sandbox.assert_no_leftovers();
+        }
+
+        #[test]
+        fn clear_takes_the_section_out_and_leaves_the_rest() {
+            let sandbox = Sandbox::new("clear", STOCK);
+            assert!(sandbox.run(&["block", "a.com"]).status.success());
+            let out = sandbox.run(&["clear"]);
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(sandbox.hosts(), STOCK, "clear should give the file back unchanged");
+            assert!(!is_block_active(&sandbox.hosts()));
+            sandbox.assert_no_leftovers();
+        }
+
+        #[test]
+        fn clear_also_removes_a_leftover_0_1_1_block() {
+            let sandbox = Sandbox::new("legacy", STOCK_WITH_LEGACY);
+            assert!(sandbox.run(&["clear"]).status.success());
+            assert_eq!(sandbox.hosts(), STOCK);
+        }
+
+        #[test]
+        fn a_hostile_name_is_refused_before_the_file_is_touched() {
+            let sandbox = Sandbox::new("hostile", STOCK);
+            for bad in [
+                "a.com; rm -rf /",
+                "a.com$(id)",
+                "a.com`id`",
+                "a b.com",
+                "A.com",
+                "a.com\n127.0.0.1 evil.com",
+                "",
+            ] {
+                let out = sandbox.run(&["block", bad]);
+                assert!(!out.status.success(), "{bad:?} was accepted");
+                assert_eq!(sandbox.hosts(), STOCK, "{bad:?} changed the file");
+            }
+            // the mode itself is a closed set, and `block` with no names is not a call
+            for args in [vec!["install-malware"], vec!["block"], vec![]] {
+                assert!(!sandbox.run(&args).status.success(), "{args:?} was accepted");
+                assert_eq!(sandbox.hosts(), STOCK);
+            }
+            sandbox.assert_no_leftovers();
+        }
+
+        /// Junk that cannot break the line is written as it is. `-x.com` is not a real host and
+        /// `a..b.com` is not either, but both are inert text on a line we own, and the app's own
+        /// normalization accepts them for the same reason. The line above is the one that matters:
+        /// nothing may get through that could end the line or start a new directive. Rejecting these
+        /// would mean a second copy of the rule in the renderer for no security gain.
+        #[test]
+        fn junk_that_cannot_break_a_line_is_written_as_it_is() {
+            let sandbox = Sandbox::new("junk", STOCK);
+            assert!(sandbox.run(&["block", "-x.com", "a..b.com"]).status.success());
+            let text = sandbox.hosts();
+            assert!(text.contains("127.0.0.1 -x.com\n"));
+            assert!(text.contains("::1 a..b.com\n"));
+            assert_eq!(text.matches(MARKER_START).count(), 1);
+            // localhost plus the two names, so nothing extra was written on the way
+            assert_eq!(text.matches("127.0.0.1 ").count(), 3);
+            sandbox.assert_no_leftovers();
+        }
+
+        #[test]
+        fn the_caps_are_the_ones_the_app_applies() {
+            let sandbox = Sandbox::new("caps", STOCK);
+            let at_cap: Vec<String> = (0..MAX_DOMAINS).map(|i| format!("d{i}.com")).collect();
+            let args: Vec<&str> = at_cap.iter().map(String::as_str).collect();
+            let out = Command::new("sh")
+                .arg(&sandbox.script)
+                .arg("block")
+                .args(&args)
+                .output()
+                .expect("run");
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let text = sandbox.hosts();
+            assert_eq!(text.matches("127.0.0.1 d").count(), MAX_DOMAINS);
+
+            let over: Vec<String> = (0..=MAX_DOMAINS).map(|i| format!("d{i}.com")).collect();
+            let over_args: Vec<&str> = over.iter().map(String::as_str).collect();
+            let out = Command::new("sh")
+                .arg(&sandbox.script)
+                .arg("block")
+                .args(&over_args)
+                .output()
+                .expect("run");
+            assert!(!out.status.success(), "one over the cap must be refused");
+            assert_eq!(sandbox.hosts(), text, "a refused run must not change the file");
+
+            // 254 characters is one over the length a DNS name may have
+            let long = format!("{}.com", "a".repeat(250));
+            assert!(!sandbox.run(&["block", long.as_str()]).status.success());
+            sandbox.assert_no_leftovers();
+        }
+
+        #[test]
+        fn two_runs_at_once_cannot_blend_into_one_block() {
+            // regression: with a fixed staging name, a run could render from a half-written file and
+            // end up with domains from both runs inside one managed section
+            let sandbox = Sandbox::new("concurrent", STOCK);
+            let first: Vec<String> = (0..200).map(|i| format!("a{i}.com")).collect();
+            let second: Vec<String> = (0..200).map(|i| format!("b{i}.com")).collect();
+            let a = Command::new("sh")
+                .arg(&sandbox.script)
+                .arg("block")
+                .args(&first)
+                .spawn()
+                .expect("spawn");
+            let b = Command::new("sh")
+                .arg(&sandbox.script)
+                .arg("block")
+                .args(&second)
+                .spawn()
+                .expect("spawn");
+            assert!(a.wait_with_output().expect("wait").status.success());
+            assert!(b.wait_with_output().expect("wait").status.success());
+
+            let text = sandbox.hosts();
+            assert_eq!(text.matches(MARKER_START).count(), 1, "blocks were blended:\n{text}");
+            assert_eq!(text.matches(MARKER_END).count(), 1);
+            assert!(text.contains("127.0.0.1 localhost\n"), "the file's own lines must survive");
+            let from_first = (0..200)
+                .filter(|i| text.contains(&format!("127.0.0.1 a{i}.com\n")))
+                .count();
+            let from_second = (0..200)
+                .filter(|i| text.contains(&format!("127.0.0.1 b{i}.com\n")))
+                .count();
+            assert!(
+                (from_first == 200 && from_second == 0) || (from_first == 0 && from_second == 200),
+                "the file holds a mix: {from_first} from one run, {from_second} from the other"
+            );
+            sandbox.assert_no_leftovers();
+        }
+    }
+
+    // ── the other two platforms ─────────────────────────────────────────────────────────────────
+    // These renderers are gated to their own OS in a normal build; `test` includes them so their text
+    // can be checked on any machine instead of only on a runner nobody can debug.
+
+    #[cfg(any(target_os = "macos", test))]
+    mod apple {
+        use super::*;
+
+        #[test]
+        fn escaping_survives_a_quote_a_backslash_and_a_newline() {
+            assert_eq!(apple_escape("plain"), "plain");
+            assert_eq!(apple_escape("a\"b"), "a\\\"b");
+            assert_eq!(apple_escape("a\\b"), "a\\\\b");
+            assert_eq!(apple_escape("a\nb"), "a\\nb");
+            // order matters: quotes are escaped after backslashes, or the backslash a quote gains would
+            // be doubled and the quote would close the AppleScript string early
+            assert_eq!(apple_escape("\\\""), "\\\\\\\"");
+        }
+
+        #[test]
+        fn what_applescript_parses_back_is_the_script_we_meant() {
+            let original = render_script();
+            let escaped = apple_escape(&original);
+            assert!(!escaped.contains('\n'), "a raw newline would end the command");
+
+            let mut unescaped = String::new();
+            let mut chars = escaped.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    match chars.next() {
+                        Some('n') => unescaped.push('\n'),
+                        Some(other) => unescaped.push(other),
+                        None => panic!("dangling backslash"),
+                    }
+                } else {
+                    unescaped.push(c);
+                }
+            }
+            assert_eq!(unescaped, original, "the round trip has to give the script back");
+        }
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    mod powershell {
+        use super::*;
+
+        #[test]
+        fn no_template_token_survives() {
+            let text = windows_render_script(&["block".into(), "a.com".into(), "b.com".into()]);
+            for token in ["@HOSTS@", "@MODE@", "@DOMAINS@"] {
+                assert!(!text.contains(token), "{token} was left in the script");
+            }
+            assert!(text.contains("$ErrorActionPreference = 'Stop'"), "a failure must stop the run");
+            assert!(text.contains(&format!("$hosts = '{HOSTS_PATH}'")));
+            assert!(text.contains("'block' -eq 'block'"));
+            assert!(text.contains("foreach ($d in @('a.com','b.com'))"));
+            // -ceq, because -eq is case-insensitive and would treat a lowercase comment as our marker
+            assert!(text.contains("-ceq '# BEGIN FOCUSBLOCKER'"));
+            assert!(
+                text.contains("[IO.File]::Replace($stage, $hosts, $null)"),
+                "Move-Item deletes the destination first, which can leave no hosts file at all"
+            );
+        }
+
+        #[test]
+        fn clear_asks_for_no_domains() {
+            let text = windows_render_script(&["clear".into()]);
+            assert!(text.contains("'clear' -eq 'block'"));
+            assert!(text.contains("foreach ($d in @())"));
+        }
+
+        #[test]
+        fn the_encoded_command_is_utf16le_base64() {
+            // cross-checked against node: Buffer.from(s, "utf16le").toString("base64")
+            assert_eq!(base64_utf16le(""), "");
+            assert_eq!(base64_utf16le("A"), "QQA=");
+            assert_eq!(base64_utf16le("AB"), "QQBCAA==");
+            assert_eq!(base64_utf16le("ABC"), "QQBCAEMA");
+            assert_eq!(base64_utf16le("x.com"), "eAAuAGMAbwBtAA==");
+
+            let blob = base64_utf16le(&windows_render_script(&["block".into(), "a.com".into()]));
+            assert!(blob.is_ascii());
+            assert_eq!(blob.len() % 4, 0, "base64 comes in groups of four");
+            assert_eq!(
+                blob.trim_end_matches('=').matches('=').count(),
+                0,
+                "padding belongs at the end and nowhere else"
+            );
+        }
+    }
 }
