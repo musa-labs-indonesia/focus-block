@@ -391,9 +391,10 @@ export default function App() {
         // finished
         if (intervalRef.current) window.clearInterval(intervalRef.current);
         // deactivate blocks
-        invoke("deactivate_blocks").catch(() => {});
+        invoke("deactivate_blocks")
+          .then(() => setToast(`✓ "${activeTodo?.title || "Task"}" is complete. Blocks cleared.`))
+          .catch((e) => setToast(`Session ended, but blocks were not cleared: ${String(e).slice(0, 120)}`));
         setTimeout(() => refreshBlockStatus(), 300);
-        setToast(`✓ "${activeTodo?.title || "Task"}" is complete. Blocks cleared.`);
         setTimeout(() => setToast(null), 4000);
         setActive(null);
       }
@@ -879,11 +880,11 @@ export default function App() {
                     {blockStatus?.active ? <span className="px-2 py-1 rounded bg-red-50 border border-red-200 text-red-700">⛔ {blockStatus.sites.length} sites blocked now</span> : <span className="px-2 py-1 rounded bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400">No sites blocked now</span>}
                   </div>
                   <div className="mt-5 flex flex-wrap gap-2">
-                    {savedAuth?.platform !== "macos" && savedAuth?.platform !== "windows" && (savedAuth?.enabled ? <button onClick={disableSavedAuth} className="min-h-11 px-4 py-2 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-semibold hover:bg-black">Disable saved authorization</button> : <button onClick={enableSavedAuth} className="min-h-11 px-4 py-2 rounded-md bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700">Enable saved authorization</button>)}
+                    {savedAuth?.platform === "linux" && (savedAuth?.enabled ? <button onClick={disableSavedAuth} className="min-h-11 px-4 py-2 rounded-md bg-zinc-900 dark:bg-zinc-700 text-white text-sm font-semibold hover:bg-black">Disable saved authorization</button> : <button onClick={enableSavedAuth} className="min-h-11 px-4 py-2 rounded-md bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700">Enable saved authorization</button>)}
                     <button onClick={() => {refreshBlockStatus(); refreshSavedAuth(); refreshHostsPreview(); showToast("Settings refreshed");}} className="min-h-11 px-4 py-2 rounded-md bg-white dark:bg-zinc-900 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-700 text-sm font-semibold hover:bg-zinc-50 dark:bg-zinc-800">Refresh status</button>
                   </div>
-                  <p className="text-xs text-zinc-400 mt-3">{savedAuth && savedAuth.platform !== "linux" ? "Linux only — macOS and Windows ask for system permission at each session start and finish." : "Disabled means Focus Block asks for permission at each session start and finish. Enabling requires one system authorization, then never again until you disable it."}</p>
-                  {savedAuth?.enabled && savedAuth.helper_version === 1 && <p className="mt-3 border-l-2 border-amber-300 pl-3 text-xs text-amber-800">Installed by an older version, still using the old helper. Disable and enable saved authorization again to upgrade it — one password.</p>}
+                  <p className="text-xs text-zinc-400 mt-3">{savedAuth?.platform === "linux" ? "Disabled means Focus Block asks for permission at each session start and finish. Enabling requires one system authorization, then never again until you disable it." : savedAuth ? "Linux only — macOS and Windows ask for system permission at each session start and finish." : ""}</p>
+                  {savedAuth?.helper_version === 1 && <p className="mt-3 border-l-2 border-amber-300 pl-3 text-xs text-amber-800">Installed by an older version and no longer used, so writes ask for a password now. Press Enable to replace it — one password.</p>}
                 </section>
 
                 <section className="border-b border-zinc-200 dark:border-zinc-700 pb-6" aria-labelledby="hosts-heading">

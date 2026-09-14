@@ -21,13 +21,6 @@ const SUDOERS_PATH: &str = "/etc/sudoers.d/focusblock";
 #[cfg(target_os = "linux")]
 const CRON_PATH: &str = "/etc/cron.d/focusblock";
 
-// Only the Linux v1-rule fallback stages a file any more: every other path has root render the block
-// from validated names, so no writable path is ever handed to an elevated command.
-#[cfg(target_os = "linux")]
-fn tmp_hosts_path() -> String {
-    "/tmp/focusblock_hosts_tmp".to_string()
-}
-
 // --- sqlite types ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,17 +48,15 @@ fn db_path(handle: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let new_path = dir.join("focusblock.db");
-    // migrate from old identifier / old db name (focus-block)
+    // migrate from the old identifier / old db name (focus-block)
     if !new_path.exists() {
         if let Ok(home) = std::env::var("HOME") {
-            let old1 = PathBuf::from(format!("{}/.local/share/com.muhsalaa.focusblock/focusblock.db", home));
-            let old2 = dir.join("focusblock.db");
-            let old3 = PathBuf::from(format!("{}/.local/share/com.muhsalaa.focusblock/focusblock.db", home));
-            for old in [old1, old2, old3] {
-                if old.exists() {
-                    let _ = std::fs::copy(&old, &new_path);
-                    break;
-                }
+            let old = PathBuf::from(format!(
+                "{}/.local/share/com.muhsalaa.focusblock/focusblock.db",
+                home
+            ));
+            if old.exists() {
+                let _ = std::fs::copy(&old, &new_path);
             }
         }
     }
@@ -196,7 +187,8 @@ fn strip_existing_block(content: &str) -> String {
     let mut result = String::new();
     let mut inside = false;
     for line in content.lines() {
-        let trimmed = line.trim();
+        // ASCII whitespace only, to match the POSIX [[:space:]] the shell renderer strips with
+        let trimmed = line.trim_matches(|c: char| c.is_ascii_whitespace());
         if trimmed == MARKER_START || trimmed == MARKER_START_OLD {
             inside = true;
             continue;
@@ -257,16 +249,25 @@ fn try_write_hosts_direct(content: &str) -> Result<(), String> {
 // macOS admin command embeds it, so the two platforms cannot drift apart. It takes
 // `block <domain>...` or `clear` and renders the section itself, which is what keeps caller-supplied
 // bytes out of /etc/hosts.
+/// Domains per write. Mirrored into the renderer below so the app and the script cannot disagree.
+const MAX_DOMAINS: usize = 500;
+
+/// Windows carries the renderer on a command line, so the encoded form has a budget of its own. It is
+/// far below the script's cap and hits first — and exceeding it used to fail silently (see the launcher).
+#[cfg(target_os = "windows")]
+const WINDOWS_ENCODED_BUDGET: usize = 24000;
+
 const RENDER_SCRIPT: &str = r#"#!/bin/sh
 # focusblock-helper v2
 # Run as root by the app: `focusblock-apply block <domain>...` or `focusblock-apply clear`.
-# The section is rendered here from validated names, so no caller-supplied bytes reach /etc/hosts and
-# there is no staging file to race, pre-create or symlink.
+# The section is rendered here from validated names, so no caller-supplied bytes reach /etc/hosts.
 set -eu
 
 HOSTS=/etc/hosts
-STAGE=/etc/.focusblock.hosts.new
-MAX_DOMAINS=500
+# per-run staging file: a fixed name let two concurrent runs blend their blocks into one
+STAGE=$(mktemp /etc/.focusblock.hosts.XXXXXX)
+trap 'rm -f "$STAGE"' EXIT INT TERM
+MAX_DOMAINS=@MAX_DOMAINS@
 
 # drop the managed region (current markers and the 0.1.1 BLOCKER2 pair), keep everything else
 strip_block() {
@@ -319,6 +320,12 @@ killall -HUP mDNSResponder 2>/dev/null || true
 echo ok
 "#;
 
+/// The renderer with its single compile-time token resolved. Every platform goes through here, so the
+/// installed helper, the macOS command and the app's own idea of the cap are all the same number.
+fn render_script() -> String {
+    RENDER_SCRIPT.replace("@MAX_DOMAINS@", &MAX_DOMAINS.to_string())
+}
+
 /// `block <domain>…` or `clear` — the argument form every platform hands to the renderer.
 fn helper_args(domains: &[String]) -> Vec<String> {
     if domains.is_empty() {
@@ -330,34 +337,33 @@ fn helper_args(domains: &[String]) -> Vec<String> {
     }
 }
 
-/// Linux: a standing rule is installed, which means the v1 file-staging protocol is what that rule
-/// understands. Checked so the prompted branch never rewrites the helper out from under such a rule.
-#[cfg(target_os = "linux")]
-fn saved_auth_rule_installed() -> bool {
-    fs::metadata(SUDOERS_PATH).is_ok()
-}
-
 /// Linux: install or refresh the helper and run it, inside one authorized command. Nothing is staged.
 #[cfg(target_os = "linux")]
 const LINUX_INSTALL_AND_RUN: &str = r#"set -eu
 body="$1"
 shift
-printf '%s' "$body" > @HELPER@
-chown root:root @HELPER@
-chmod 755 @HELPER@
+# write beside it and rename: an in-place write that fails leaves a truncated helper behind
+printf '%s' "$body" > @HELPER@.new
+chown root:root @HELPER@.new
+chmod 755 @HELPER@.new
+mv -f @HELPER@.new @HELPER@
 exec @HELPER@ "$@"
 "#;
 
 /// The renderer as a self-contained command for an already-root shell, with its arguments preloaded.
 #[cfg(target_os = "macos")]
 fn render_command(args: &[String]) -> String {
-    format!("set -- {}; {}", args.join(" "), RENDER_SCRIPT)
+    format!("set -- {}; {}", args.join(" "), render_script())
 }
 
-/// AppleScript string literal: backslash first, then quote, or the escaping eats itself.
+/// AppleScript string literal: backslash first, then quote, then newlines. The last one matters: the
+/// renderer is multi-line, and this way correctness does not depend on AppleScript preserving literal
+/// line breaks inside a string — it turns them into its own \n escape, which it parses back to LF.
 #[cfg(target_os = "macos")]
 fn apple_escape(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
+    text.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// Windows has no sh, so the same shape is expressed in PowerShell: strip, render, swap, flush. It
@@ -373,22 +379,42 @@ fn windows_render_script(args: &[String]) -> String {
     let template = r#"$ErrorActionPreference = 'Stop'
 $hosts = '@HOSTS@'
 $stage = Join-Path (Split-Path $hosts) '.focusblock.hosts.new'
+
+# keep the file's own encoding: strict UTF-8 first, Latin-1 if the bytes are not valid UTF-8, so a legacy
+# comment cannot be turned into replacement characters by a write that had nothing to do with it
+$bytes = [IO.File]::ReadAllBytes($hosts)
+$strict = New-Object System.Text.UTF8Encoding($false, $true)
+try {
+  $text = $strict.GetString($bytes)
+  $enc = New-Object System.Text.UTF8Encoding($false)
+} catch {
+  $text = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
+  $enc = [Text.Encoding]::GetEncoding(28591)
+}
+
 $keep = New-Object 'System.Collections.Generic.List[string]'
 $skip = $false
-foreach ($line in [IO.File]::ReadAllLines($hosts)) {
+foreach ($line in ($text -split "`r`n|`n|`r")) {
   $t = $line.Trim()
-  if ($t -eq '# BEGIN FOCUSBLOCKER' -or $t -eq '# BEGIN BLOCKER2') { $skip = $true; continue }
-  if ($t -eq '# END FOCUSBLOCKER' -or $t -eq '# END BLOCKER2') { $skip = $false; continue }
+  # -ceq: -eq is case-insensitive, which would treat '# begin focusblocker' as our marker
+  if ($t -ceq '# BEGIN FOCUSBLOCKER' -or $t -ceq '# BEGIN BLOCKER2') { $skip = $true; continue }
+  if ($t -ceq '# END FOCUSBLOCKER' -or $t -ceq '# END BLOCKER2') { $skip = $false; continue }
   if (-not $skip) { $keep.Add($line) }
 }
 if ('@MODE@' -eq 'block') {
+  # second validation layer: the shell renderer re-checks its argv, so this one must too
+  foreach ($d in @(@DOMAINS@)) {
+    if ($d -notmatch '^[a-z0-9.-]+$') { throw "invalid domain: $d" }
+  }
   $keep.Add('# BEGIN FOCUSBLOCKER')
   $keep.Add('# Managed by Focus Block - do not edit manually')
   foreach ($d in @(@DOMAINS@)) { $keep.Add("127.0.0.1 $d"); $keep.Add("::1 $d") }
   $keep.Add('# END FOCUSBLOCKER')
 }
-[IO.File]::WriteAllLines($stage, $keep, (New-Object System.Text.UTF8Encoding($false)))
-Move-Item -Force $stage $hosts
+[IO.File]::WriteAllLines($stage, $keep, $enc)
+# [IO.File]::Replace, not Move-Item: PowerShell 5.1 deletes the destination first, so a failure in between
+# would leave the machine with no hosts file at all
+[IO.File]::Replace($stage, $hosts, $null)
 ipconfig /flushdns | Out-Null
 "#;
     template
@@ -424,7 +450,6 @@ fn is_saved_auth_active() -> bool {
 }
 
 // `domains` is only consumed on Linux, where the helper takes the list instead of the rendered file.
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn write_hosts_privileged(content: &str, domains: &[String]) -> Result<(), String> {
     if try_write_hosts_direct(content).is_ok() {
         return Ok(());
@@ -441,50 +466,31 @@ fn write_hosts_privileged(content: &str, domains: &[String]) -> Result<(), Strin
 
     let args = helper_args(domains);
 
-    // Prompted paths. Root still receives validated domain names rather than a file this process can
-    // write, so there is nothing for an attacker to swap between the prompt and the write — on every
-    // platform the renderer runs inside the command the user authorizes.
+    // Prompted paths. Root receives validated domain names rather than a file this process can write, so
+    // there is nothing to swap between the prompt and the write — the renderer runs inside the command
+    // the user authorizes, on every platform. It also means the first prompted write replaces an old v1
+    // helper with this one, which leaves a stale v1 sudoers rule unable to do anything: handed a file
+    // path, the helper now prints usage and exits. That, not the refusal above, is what revokes it.
     #[cfg(target_os = "linux")]
     {
-        if !saved_auth_rule_installed() {
-            // one authorized command installs or refreshes the helper and runs it
-            let install = LINUX_INSTALL_AND_RUN.replace("@HELPER@", HELPER_PATH);
-            let mut argv: Vec<String> = vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                install,
-                "focusblock".to_string(),
-                RENDER_SCRIPT.to_string(),
-            ];
-            argv.extend(args.iter().cloned());
-            return match Command::new("pkexec").args(&argv).output() {
-                Ok(out) if out.status.success() => {
-                    flush_dns();
-                    Ok(())
-                }
-                Ok(out) => Err(format!(
-                    "pkexec failed: {} | host write requires admin. Tip: enable saved authorization to skip this prompt.",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )),
-                Err(e) => Err(format!("pkexec not available: {}", e)),
-            };
-        }
-
-        // A 0.1.1-era rule is installed and only understands a file path. Rewriting the helper now would
-        // break that rule, so this prompted write stages the rendered file as before; re-enabling
-        // replaces rule and helper together and closes the gap, which Settings asks the user to do.
-        let tmp_path = tmp_hosts_path();
-        fs::write(&tmp_path, content).map_err(|e| format!("tmp write failed: {}", e))?;
-        let out = Command::new("pkexec").args(["cp", &tmp_path, HOSTS_PATH]).output();
-        let _ = fs::remove_file(&tmp_path);
-        return match out {
-            Ok(o) if o.status.success() => {
+        let install = LINUX_INSTALL_AND_RUN.replace("@HELPER@", HELPER_PATH);
+        let mut argv: Vec<String> = vec![
+            // absolute: pkexec resolves a bare name against the caller's PATH
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            install,
+            "focusblock".to_string(),
+            render_script(),
+        ];
+        argv.extend(args.iter().cloned());
+        return match Command::new("pkexec").args(&argv).output() {
+            Ok(out) if out.status.success() => {
                 flush_dns();
                 Ok(())
             }
-            Ok(o) => Err(format!(
+            Ok(out) => Err(format!(
                 "pkexec failed: {} | host write requires admin. Tip: enable saved authorization to skip this prompt.",
-                String::from_utf8_lossy(&o.stderr).trim()
+                String::from_utf8_lossy(&out.stderr).trim()
             )),
             Err(e) => Err(format!("pkexec not available: {}", e)),
         };
@@ -518,8 +524,17 @@ fn write_hosts_privileged(content: &str, domains: &[String]) -> Result<(), Strin
     #[cfg(target_os = "windows")]
     {
         let encoded = base64_utf16le(&windows_render_script(&args));
+        if encoded.len() > WINDOWS_ENCODED_BUDGET {
+            return Err(format!(
+                "block list too large for one Windows write ({} domains) — reduce the global block list",
+                args.len().saturating_sub(1)
+            ));
+        }
+        // $ErrorActionPreference is load-bearing: a cancelled UAC prompt is a non-terminating error, so
+        // $p stayed $null and `exit $null` exited 0 — the app then reported success for a write that never
+        // happened, and started a locked session that blocked nothing.
         let ps = format!(
-            "$p = Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+            "$ErrorActionPreference = 'Stop'; $p = Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','{}' -Verb RunAs -Wait -PassThru; if (-not $p) {{ exit 1 }}; exit $p.ExitCode",
             encoded
         );
         return match Command::new("powershell").args(["-NoProfile", "-Command", &ps]).output() {
@@ -527,7 +542,10 @@ fn write_hosts_privileged(content: &str, domains: &[String]) -> Result<(), Strin
                 flush_dns();
                 Ok(())
             }
-            Ok(_) => Err("hosts write needs Administrator — accept the UAC prompt, or run Focus Block as Administrator".to_string()),
+            Ok(out) => Err(format!(
+                "hosts write needs Administrator — accept the UAC prompt ({}), or run Focus Block as Administrator",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
             Err(e) => Err(format!("powershell not available: {}", e)),
         };
     }
@@ -556,10 +574,23 @@ fn read_hosts_content() -> Result<String, String> {
 
 #[tauri::command]
 fn activate_blocks(sites: Vec<String>) -> Result<String, String> {
+    let had_input = sites.iter().any(|s| !s.trim().is_empty());
     let domains = expand_sites(sites);
     if domains.is_empty() {
-        // if empty, just deactivate
+        if had_input {
+            // every entry failed validation: say so rather than quietly starting a session that blocks
+            // nothing and reporting success
+            return Err("no valid domains to block — check the site list".to_string());
+        }
+        // nothing asked for, so this is really a clear
         return deactivate_blocks();
+    }
+    if domains.len() > MAX_DOMAINS {
+        return Err(format!(
+            "{} domains after alias expansion, limit is {} — reduce the global block list",
+            domains.len(),
+            MAX_DOMAINS
+        ));
     }
     let current = read_hosts_content()?;
     let stripped = strip_existing_block(&current);
@@ -599,7 +630,7 @@ fn get_block_status() -> Result<serde_json::Value, String> {
     if active {
         let mut inside = false;
         for line in content.lines() {
-            let t = line.trim();
+            let t = line.trim_matches(|c: char| c.is_ascii_whitespace());
             if t == MARKER_START || t == MARKER_START_OLD {
                 inside = true;
                 continue;
@@ -634,10 +665,13 @@ fn preview_hosts() -> Result<String, String> {
 
 #[tauri::command]
 fn check_saved_auth() -> Result<serde_json::Value, String> {
+    let helper_version = installed_helper_version();
     Ok(serde_json::json!({
         "platform": std::env::consts::OS,
-        "enabled": is_saved_auth_active(),
-        "helper_version": installed_helper_version(),
+        // "enabled" means the passwordless path actually works. File presence alone used to report green
+        // while every write still prompted (a v1 helper, or a v2 helper whose rule does not match).
+        "enabled": is_saved_auth_active() && helper_version == 2,
+        "helper_version": helper_version,
     }))
 }
 
@@ -667,6 +701,11 @@ fn current_username() -> Result<String, String> {
     if user.is_empty() {
         return Err("could not determine the current username — refusing to write a sudoers rule".to_string());
     }
+    // ALL is a sudoers keyword, not a name: `ALL ALL=(ALL) NOPASSWD: …` parses fine and grants every
+    // local user, so it must never get through here.
+    if user.eq_ignore_ascii_case("all") {
+        return Err("refusing to write a sudoers rule with a reserved username".to_string());
+    }
     if !user
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
@@ -685,7 +724,7 @@ fn enable_saved_auth() -> Result<String, String> {
     // helper script validates tmp and does cp + flush
     // Installed verbatim; the identical text is embedded in the macOS admin command, so root renders
     // the block on every platform and never copies a file this process can still write.
-    let helper_content = RENDER_SCRIPT;
+    let helper_content = render_script();
     let user = current_username()?;
 
     // The helper body and the username reach root as argv, never as files. Staging them under /tmp
@@ -716,9 +755,10 @@ if ! visudo -cf /etc/.focusblock.sudoers.new >/dev/null 2>&1; then
 fi
 
 # only now touch the live files: helper first, rule second, so either both land or neither does
-printf '%s' "$helper_body" > @HELPER@
-chown root:root @HELPER@
-chmod 755 @HELPER@
+printf '%s' "$helper_body" > @HELPER@.new
+chown root:root @HELPER@.new
+chmod 755 @HELPER@.new
+mv -f @HELPER@.new @HELPER@
 mv -f /etc/.focusblock.sudoers.new @SUDOERS@
 
 # legacy 0.1.1 midnight reset, if an older install left one behind
@@ -735,7 +775,7 @@ echo "ok"
             "-c",
             script.as_str(),
             "focusblock-enable",
-            helper_content,
+            &helper_content,
             user.as_str(),
         ])
         .output()
