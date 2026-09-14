@@ -13,7 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - macOS `.dmg` built in CI as a universal binary (Apple Silicon + Intel).
 - Global blocks can be added while a block is running — a session or a scheduled window — and removing one waits until that block ends, so a block can only ever get stricter.
-- A window that is blocking right now can only grow: sites can be added to it, but its hours, its sites and its removal wait until it ends.
+- A schedule that is blocking right now can only grow: sites can be added to it, but its hours, its sites and its removal wait until it ends.
+- The schedule editor and the authorization toggle are locked while a session runs or a schedule is blocking; the global block list stays editable, since adding to it is the one way to block more mid-session.
 - Scheduled blocks: up to two non-overlapping daily hour windows, each with its own domains, enforced while the app is open.
 - A locked design system (`design.md` + `tokens.css`): OKLCH light and dark palettes, Space Grotesk / Inter / JetBrains Mono bundled, hand-drawn icons.
 - Ad-hoc signing for the macOS bundle, so Gatekeeper says "unidentified developer" instead of "damaged".
