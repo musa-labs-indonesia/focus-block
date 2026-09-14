@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-14
+
 ### Added
 
 - macOS `.dmg` built in CI as a universal binary (Apple Silicon + Intel).
@@ -99,5 +101,6 @@ First release.
 - The released macOS build is not notarized (no Apple Developer account), so Gatekeeper blocks the
   first launch. Right-click → Open, or `xattr -dr com.apple.quarantine "/Applications/FocusBlock.app"`.
 
-[Unreleased]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/musa-labs-indonesia/focus-block/releases/tag/v0.1.1
