@@ -7,9 +7,9 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
 - **Tasks** — title, duration 1–480 min, per-task blocked domains, `createdAt`
 - **Global blocks** — applied to every session (merged with per-task list on Start)
 - **Timer** — `MM:SS`, progress bar, auto-clears hosts on finish, locks edit/delete/add while running
-- **Hosts blocking** — `127.0.0.1` + `::1` for apex + `www.` alias, section `# BEGIN BLOCKER2` → `# END BLOCKER2`, `resolvectl`/`systemd-resolve` flush
+- **Hosts blocking** — `127.0.0.1` + `::1` for apex + `www.` alias, section `# BEGIN FOCUSBLOCKER` → `# END FOCUSBLOCKER` (`# BEGIN BLOCKER2` from 0.1.1 is still stripped on sight), `resolvectl`/`systemd-resolve` flush
 - **Domain aliases** — `twitter ↔ x.com ↔ t.co`, `youtube ↔ youtu.be ↔ m.youtube ↔ youtube-nocookie`, `instagram ↔ ig.me`, etc. (Rust `domain_aliases`)
-- **Saved authorization** (Linux) — one password, then no prompts ever: helper `/usr/local/bin/focusblock-apply` + sudoers `/etc/sudoers.d/focusblock`, `sudo -n` path. Persists until disabled; disable restores a password at every Start/End
+- **Saved authorization** (Linux) — one password, then no prompts ever: helper `/usr/local/bin/focusblock-apply` + sudoers `/etc/sudoers.d/focusblock`, `sudo -n` path. Persists until disabled; disable restores a password at every Start/End. Removing the package (deb/rpm) removes both; an AppImage has no uninstall hook, so disable it first or delete both paths by hand
 - **SQLite** — `rusqlite 0.31 bundled` at `~/.local/share/com.muhsalaa.focusblock/focusblock.db` (WAL): `todos`, `global_blocks`, `active_session`; migrates once from `localStorage`
 - **Hard block close** — `CloseRequested` prevented while `active_session.end_at > now` (Rust + frontend `onCloseRequested` toast), orphan hosts auto-recovered on next launch
 - **Reject → no session** — if `pkexec`/`sudo` rejected, `activate_blocks` fails and session does not start
@@ -70,7 +70,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 npx tauri build               # release + bundles
 # outputs:
 #   src-tauri/target/release/focus-block                 (binary 17M)
-#   src-tauri/target/release/bundle/deb/Focus Block_0.1.1_amd64.deb  (5.0M)
+#   src-tauri/target/release/bundle/deb/FocusBlock_0.1.1_amd64.deb  (5.0M)
 #   src-tauri/target/release/bundle/rpm/Focus Block-*.rpm
 #   src-tauri/target/release/bundle/appimage/Focus Block_*.AppImage
 ```
@@ -79,12 +79,12 @@ npx tauri build               # release + bundles
 
 ```bash
 # from project root after build
-pkexec dpkg -i src-tauri/target/release/bundle/deb/Focus Block_0.1.1_amd64.deb
+pkexec dpkg -i src-tauri/target/release/bundle/deb/FocusBlock_0.1.1_amd64.deb
 # or: sudo dpkg -i ... ; sudo apt-get install -f  # if deps missing
 # launch:
 focus-block
 # or via app launcher: Focus Block
-# .desktop: /usr/share/applications/Focus Block.desktop → Exec=focus-block
+# .desktop: /usr/share/applications/FocusBlock.desktop → Exec=focus-block
 ```
 
 ## macOS (dmg)
@@ -130,23 +130,23 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
   sqlite3 ~/.local/share/com.muhsalaa.focusblock/focusblock.db "select * from todos; select * from global_blocks; select * from active_session;"
   ```
 - **Migration:** if `todos`+`global_blocks`+`active_session` empty but `localStorage` has `focusblock_todos`/`focusblock_global_blocks`/`focusblock_active_session`, migrates once via `sync_todos`/`set_global_blocks`/`save_active_session` (fallback to `localStorage` when not in Tauri, e.g. `npm run dev`).
-- **Hosts:** `/etc/hosts` block `# BEGIN BLOCKER2` managed, never edit manually; cleared on finish, on close (best-effort with `sudo -n` then `pkexec`), or on next launch orphan recovery.
+- **Hosts:** `/etc/hosts` block `# BEGIN FOCUSBLOCKER` managed, never edit manually; cleared on finish, on close (best-effort: saved-auth helper, then `pkexec`), or on next launch orphan recovery.
 - **Old localStorage keys** kept for fallback only — not source of truth after first Tauri launch.
 
 ## Permissions
 
 - **First Start/End without saved authorization:** `pkexec` dialog (system password)
 - **Saved authorization enabled:** `sudo -n /usr/local/bin/focusblock-apply block <domain>…` (no prompt) and `sudo -n /usr/local/bin/focusblock-apply clear`. The helper validates every name against `a-z0-9.-` and renders the `127.0.0.1` / `::1` lines itself, then swaps the file in with `mv` — it never copies caller-supplied content, so a hostile caller can at most ask to block a domain, and a crash can't leave `/etc/hosts` half-written
-- **Without saved authorization:** the same renderer runs under `pkexec` on Linux — installed or refreshed in the very same authorized command — or embedded in the macOS admin command / an encoded PowerShell command on the others. One prompt per Start/End, same validation, same atomic swap. The one exception is a leftover 0.1.1-era rule, which only understands a file path: that single write is still staged the old way, and re-enabling replaces rule and helper together (Settings says so)
+- **Without saved authorization:** the same renderer runs under `pkexec` on Linux — installed or refreshed in the very same authorized command — or embedded in the macOS admin command / an encoded PowerShell command on the others. One prompt per Start/End, same validation, same atomic swap. Nothing is staged, so there is no file to swap out from under the prompt; and because that command rewrites the helper, the first prompted write after upgrading from 0.1.1 is what makes the old file-path rule inert
 - **Trust model worth keeping:** the helper accepts `block <domain>…` or `clear` and nothing else, and renders the section from names it validates itself. Any future change that lets caller-supplied *content* become `/etc/hosts` re-opens the whole class of bugs this design removed
 - **Files:** `/usr/local/bin/focusblock-apply` `755`, `/etc/sudoers.d/focusblock` `440`, both `root:root`. One `pkexec` stages the rule, validates it with `visudo -cf`, and only then installs — a rule that does not parse never reaches `sudoers.d`, and a failed install changes nothing. No cron file is installed — `/etc/cron.d/focusblock` only ever appears as a leftover from 0.1.1 and is removed on enable
 - **Check:** `sudo -n -l` should show `(ALL) NOPASSWD: /usr/local/bin/focusblock-apply block *, /usr/local/bin/focusblock-apply clear`; `pkexec cat /etc/sudoers.d/focusblock` to inspect. `head -2 /usr/local/bin/focusblock-apply` should show `# focusblock-helper v2`
 
 ## Troubleshooting
 
-- **Settings warns the helper is from an older version:** the install predates the domain-list protocol and still accepts a file path. `Disable` then `Enable` saved authorization to replace it — one password.
+- **Settings warns the helper is from an older version:** the install predates the domain-list protocol and is refused, so writes ask for a password. Press `Enable saved authorization` to replace it — one password, and the stale rule goes inert with it.
 - **Saved authorization still asks password:** `pkexec chmod 755 /usr/local/bin/focusblock-apply; pkexec chmod 440 /etc/sudoers.d/focusblock; pkexec visudo -c` — must be `parsed OK`. Then `sudo -n /usr/local/bin/focusblock-apply clear` should `EXIT:0`. If still prompts, re-enable in Settings (disable → enable).
-- **Orphan block after kill -9 / close reject:** next launch auto-detects `get_block_status().active && no active_session` → tries `deactivate_blocks` and shows `Orphaned block cleared` or manual clear prompt. Manual: `pkexec sed -i '/# BEGIN BLOCKER2/,/# END BLOCKER2/d' /etc/hosts`
+- **Orphan block after kill -9 / close reject:** next launch auto-detects `get_block_status().active && no active_session` → tries `deactivate_blocks` and shows `Orphaned block cleared` or manual clear prompt. Manual: `pkexec sed -i '/# BEGIN FOCUSBLOCKER/,/# END FOCUSBLOCKER/d' /etc/hosts` (add the same for the legacy `# BEGIN BLOCKER2` pair if an old block is still there)
 - **Cannot close during session:** intentional — finish timer (no pause). If stuck, `kill` the `focus-block` process; on next launch orphan recovery will clear.
 - **Sites not blocked:** check `Settings → Hosts diagnostics` preview contains `127.0.0.1 youtube.com` + `::1`; try `ping youtube.com` → should resolve `127.0.0.1`. Check `/etc/hosts` for block, `resolvectl flush-caches`.
 - **Build fails `Cargo.toml` not found:** use `cargo check --manifest-path src-tauri/Cargo.toml` and `npx tauri build` from project root.

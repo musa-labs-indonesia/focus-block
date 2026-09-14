@@ -53,6 +53,14 @@
       "icons/icon.ico"
     ],
     "category": "Productivity",
+    "linux": {
+      "deb": {
+        "postRemoveScript": "linux/postremove.sh"
+      },
+      "rpm": {
+        "postRemoveScript": "linux/postremove.sh"
+      }
+    },
     "macOS": {
       "signingIdentity": "-",
       "hardenedRuntime": false

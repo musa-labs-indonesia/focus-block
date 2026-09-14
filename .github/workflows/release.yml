@@ -23,6 +23,25 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Tag must match the app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          conf=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          pkg=$(python3 -c "import json;print(json.load(open('package.json'))['version'])")
+          cargo=$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)
+          fail=0
+          for pair in "src-tauri/tauri.conf.json:$conf" "package.json:$pkg" "src-tauri/Cargo.toml:$cargo"; do
+            file="${pair%%:*}"
+            have="${pair#*:}"
+            if [ "$have" != "$tag" ]; then
+              echo "::error::tag v$tag does not match $file ($have) - bump all three version fields before tagging, or the artifacts ship mislabelled and apt sees no upgrade"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+          echo "tag v$tag matches all three version fields"
       - uses: actions/setup-node@v4
         with:
           node-version: 20
