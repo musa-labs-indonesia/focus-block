@@ -21,18 +21,11 @@ const SUDOERS_PATH: &str = "/etc/sudoers.d/focusblock";
 #[cfg(target_os = "linux")]
 const CRON_PATH: &str = "/etc/cron.d/focusblock";
 
-#[cfg(not(target_os = "windows"))]
-const HOSTS_TMP_PATH: &str = "/tmp/focusblock_hosts_tmp";
-
+// Only the Linux v1-rule fallback stages a file any more: every other path has root render the block
+// from validated names, so no writable path is ever handed to an elevated command.
+#[cfg(target_os = "linux")]
 fn tmp_hosts_path() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::temp_dir().join("focusblock_hosts_tmp").to_string_lossy().to_string()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        HOSTS_TMP_PATH.to_string()
-    }
+    "/tmp/focusblock_hosts_tmp".to_string()
 }
 
 // --- sqlite types ---
@@ -239,53 +232,186 @@ fn installed_helper_version() -> u8 {
     }
 }
 
-/// Write using the standing authorization if we hold one. Never prompts.
-/// Empty `domains` means "clear the block"; `v1_content` is only needed by a v1 helper, which can
-/// only write a file — that fallback exists so 0.2.0 installs keep working until they re-enable.
+// Fail closed on a v1 helper. It only accepts a file path, so driving it would re-open exactly what this
+// protocol closed: caller-supplied bytes copied to /etc/hosts as root. An out-of-date install therefore
+// falls through to the prompted path until the user re-enables, which Settings asks them to do.
 #[cfg(target_os = "linux")]
-fn try_write_with_saved_auth(domains: &[String], v1_content: &str) -> bool {
-    if !is_saved_auth_active() {
+fn try_write_with_saved_auth(domains: &[String]) -> bool {
+    if !is_saved_auth_active() || installed_helper_version() != 2 {
         return false;
     }
-    if installed_helper_version() >= 2 {
-        let mut args: Vec<String> = vec!["-n".into(), HELPER_PATH.into()];
-        if domains.is_empty() {
-            args.push("clear".into());
-        } else {
-            args.push("block".into());
-            args.extend(domains.iter().cloned());
-        }
-        return Command::new("sudo")
-            .args(&args)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-    }
-    let tmp_path = tmp_hosts_path();
-    if fs::write(&tmp_path, v1_content).is_err() {
-        return false;
-    }
-    let ok = Command::new("sudo")
-        .args(["-n", HELPER_PATH, &tmp_path])
+    let mut args: Vec<String> = vec!["-n".into(), HELPER_PATH.into()];
+    args.extend(helper_args(domains));
+    Command::new("sudo")
+        .args(&args)
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false);
-    let _ = fs::remove_file(&tmp_path);
-    ok
+        .unwrap_or(false)
 }
 
 fn try_write_hosts_direct(content: &str) -> Result<(), String> {
     fs::write(HOSTS_PATH, content).map_err(|e| e.to_string())
 }
 
-// ponytail: macOS needs root for `killall mDNSResponder`, and the osascript prompt is the only root
-// we get — so the flush rides along instead of failing unprivileged afterwards.
+// The managed-block renderer, as a shell script. Linux installs this exact text as the helper and the
+// macOS admin command embeds it, so the two platforms cannot drift apart. It takes
+// `block <domain>...` or `clear` and renders the section itself, which is what keeps caller-supplied
+// bytes out of /etc/hosts.
+const RENDER_SCRIPT: &str = r#"#!/bin/sh
+# focusblock-helper v2
+# Run as root by the app: `focusblock-apply block <domain>...` or `focusblock-apply clear`.
+# The section is rendered here from validated names, so no caller-supplied bytes reach /etc/hosts and
+# there is no staging file to race, pre-create or symlink.
+set -eu
+
+HOSTS=/etc/hosts
+STAGE=/etc/.focusblock.hosts.new
+MAX_DOMAINS=500
+
+# drop the managed region (current markers and the 0.1.1 BLOCKER2 pair), keep everything else
+strip_block() {
+  awk '
+    /^[[:space:]]*# BEGIN FOCUSBLOCKER[[:space:]]*$/ { skip = 1; next }
+    /^[[:space:]]*# BEGIN BLOCKER2[[:space:]]*$/     { skip = 1; next }
+    /^[[:space:]]*# END FOCUSBLOCKER[[:space:]]*$/   { skip = 0; next }
+    /^[[:space:]]*# END BLOCKER2[[:space:]]*$/       { skip = 0; next }
+    !skip { print }
+  ' "$HOSTS"
+}
+
+case "${1:-}" in
+  block)
+    shift
+    [ "$#" -ge 1 ] || { echo "block needs at least one domain"; exit 1; }
+    [ "$#" -le "$MAX_DOMAINS" ] || { echo "too many domains"; exit 1; }
+    for d in "$@"; do
+      [ -n "$d" ] || { echo "empty domain"; exit 1; }
+      [ "${#d}" -le 253 ] || { echo "domain too long"; exit 1; }
+      case "$d" in
+        *[!a-z0-9.-]*) echo "invalid domain"; exit 1 ;;
+      esac
+    done
+    {
+      strip_block
+      printf '# BEGIN FOCUSBLOCKER\n# Managed by Focus Block - do not edit manually\n'
+      for d in "$@"; do
+        printf '127.0.0.1 %s\n::1 %s\n' "$d" "$d"
+      done
+      printf '# END FOCUSBLOCKER\n'
+    } > "$STAGE"
+    ;;
+  clear)
+    strip_block > "$STAGE"
+    ;;
+  *)
+    echo "usage: focusblock-apply block <domain>... | clear"; exit 1 ;;
+esac
+
+# same filesystem, so this swap is atomic — a crash can't leave a half-written hosts file
+chown root:root "$STAGE"
+chmod 644 "$STAGE"
+mv -f "$STAGE" "$HOSTS"
+
+# whichever resolver stack is present, flushed from the one place that already holds root
+resolvectl flush-caches 2>/dev/null || systemd-resolve --flush-caches 2>/dev/null || true
+dscacheutil -flushcache 2>/dev/null || true
+killall -HUP mDNSResponder 2>/dev/null || true
+echo ok
+"#;
+
+/// `block <domain>…` or `clear` — the argument form every platform hands to the renderer.
+fn helper_args(domains: &[String]) -> Vec<String> {
+    if domains.is_empty() {
+        vec!["clear".to_string()]
+    } else {
+        let mut args = vec!["block".to_string()];
+        args.extend(domains.iter().cloned());
+        args
+    }
+}
+
+/// Linux: a standing rule is installed, which means the v1 file-staging protocol is what that rule
+/// understands. Checked so the prompted branch never rewrites the helper out from under such a rule.
+#[cfg(target_os = "linux")]
+fn saved_auth_rule_installed() -> bool {
+    fs::metadata(SUDOERS_PATH).is_ok()
+}
+
+/// Linux: install or refresh the helper and run it, inside one authorized command. Nothing is staged.
+#[cfg(target_os = "linux")]
+const LINUX_INSTALL_AND_RUN: &str = r#"set -eu
+body="$1"
+shift
+printf '%s' "$body" > @HELPER@
+chown root:root @HELPER@
+chmod 755 @HELPER@
+exec @HELPER@ "$@"
+"#;
+
+/// The renderer as a self-contained command for an already-root shell, with its arguments preloaded.
 #[cfg(target_os = "macos")]
-fn macos_admin_write_hosts(tmp_path: &str) -> String {
-    format!(
-        "do shell script \"cp '{}' '{}' && (killall -HUP mDNSResponder || true)\" with administrator privileges",
-        tmp_path, HOSTS_PATH
-    )
+fn render_command(args: &[String]) -> String {
+    format!("set -- {}; {}", args.join(" "), RENDER_SCRIPT)
+}
+
+/// AppleScript string literal: backslash first, then quote, or the escaping eats itself.
+#[cfg(target_os = "macos")]
+fn apple_escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Windows has no sh, so the same shape is expressed in PowerShell: strip, render, swap, flush. It
+/// carries only validated domain characters and is handed over base64/UTF-16LE, so there is no quoting
+/// layer left to escape out of.
+#[cfg(target_os = "windows")]
+fn windows_render_script(args: &[String]) -> String {
+    let list = args[1..]
+        .iter()
+        .map(|d| format!("'{d}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let template = r#"$ErrorActionPreference = 'Stop'
+$hosts = '@HOSTS@'
+$stage = Join-Path (Split-Path $hosts) '.focusblock.hosts.new'
+$keep = New-Object 'System.Collections.Generic.List[string]'
+$skip = $false
+foreach ($line in [IO.File]::ReadAllLines($hosts)) {
+  $t = $line.Trim()
+  if ($t -eq '# BEGIN FOCUSBLOCKER' -or $t -eq '# BEGIN BLOCKER2') { $skip = $true; continue }
+  if ($t -eq '# END FOCUSBLOCKER' -or $t -eq '# END BLOCKER2') { $skip = $false; continue }
+  if (-not $skip) { $keep.Add($line) }
+}
+if ('@MODE@' -eq 'block') {
+  $keep.Add('# BEGIN FOCUSBLOCKER')
+  $keep.Add('# Managed by Focus Block - do not edit manually')
+  foreach ($d in @(@DOMAINS@)) { $keep.Add("127.0.0.1 $d"); $keep.Add("::1 $d") }
+  $keep.Add('# END FOCUSBLOCKER')
+}
+[IO.File]::WriteAllLines($stage, $keep, (New-Object System.Text.UTF8Encoding($false)))
+Move-Item -Force $stage $hosts
+ipconfig /flushdns | Out-Null
+"#;
+    template
+        .replace("@HOSTS@", HOSTS_PATH)
+        .replace("@MODE@", args.first().map(String::as_str).unwrap_or("clear"))
+        .replace("@DOMAINS@", &list)
+}
+
+/// base64 of UTF-16LE, which is what `powershell -EncodedCommand` expects.
+#[cfg(target_os = "windows")]
+fn base64_utf16le(text: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+    }
+    out
 }
 
 #[cfg(target_os = "linux")]
@@ -307,82 +433,103 @@ fn write_hosts_privileged(content: &str, domains: &[String]) -> Result<(), Strin
     // validates and renders it itself and no /tmp staging happens on this path at all.
     #[cfg(target_os = "linux")]
     {
-        if try_write_with_saved_auth(domains, content) {
+        if try_write_with_saved_auth(domains) {
             flush_dns();
             return Ok(());
         }
     }
 
-    // Otherwise a prompt is unavoidable: stage the rendered file for pkexec / osascript / RunAs. This
-    // path only runs when the user is actively authorizing this write.
-    let tmp_path = tmp_hosts_path();
-    fs::write(&tmp_path, content).map_err(|e| format!("tmp write failed: {}", e))?;
+    let args = helper_args(domains);
 
+    // Prompted paths. Root still receives validated domain names rather than a file this process can
+    // write, so there is nothing for an attacker to swap between the prompt and the write — on every
+    // platform the renderer runs inside the command the user authorizes.
     #[cfg(target_os = "linux")]
     {
-        let pkexec_try = Command::new("pkexec").args(["cp", &tmp_path, HOSTS_PATH]).output();
-        match pkexec_try {
-            Ok(out) if out.status.success() => {
-                let _ = fs::remove_file(&tmp_path);
-                flush_dns();
-                return Ok(());
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                let _ = fs::remove_file(&tmp_path);
-                return Err(format!("pkexec failed: {} | host write requires admin (pkexec/sudo). Tip: enable saved authorization to skip this prompt.", stderr.trim()));
-            }
-            Err(e) => {
-                let _ = fs::remove_file(&tmp_path);
-                return Err(format!("pkexec not available: {} | sudo failed", e));
-            }
+        if !saved_auth_rule_installed() {
+            // one authorized command installs or refreshes the helper and runs it
+            let install = LINUX_INSTALL_AND_RUN.replace("@HELPER@", HELPER_PATH);
+            let mut argv: Vec<String> = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                install,
+                "focusblock".to_string(),
+                RENDER_SCRIPT.to_string(),
+            ];
+            argv.extend(args.iter().cloned());
+            return match Command::new("pkexec").args(&argv).output() {
+                Ok(out) if out.status.success() => {
+                    flush_dns();
+                    Ok(())
+                }
+                Ok(out) => Err(format!(
+                    "pkexec failed: {} | host write requires admin. Tip: enable saved authorization to skip this prompt.",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )),
+                Err(e) => Err(format!("pkexec not available: {}", e)),
+            };
         }
+
+        // A 0.1.1-era rule is installed and only understands a file path. Rewriting the helper now would
+        // break that rule, so this prompted write stages the rendered file as before; re-enabling
+        // replaces rule and helper together and closes the gap, which Settings asks the user to do.
+        let tmp_path = tmp_hosts_path();
+        fs::write(&tmp_path, content).map_err(|e| format!("tmp write failed: {}", e))?;
+        let out = Command::new("pkexec").args(["cp", &tmp_path, HOSTS_PATH]).output();
+        let _ = fs::remove_file(&tmp_path);
+        return match out {
+            Ok(o) if o.status.success() => {
+                flush_dns();
+                Ok(())
+            }
+            Ok(o) => Err(format!(
+                "pkexec failed: {} | host write requires admin. Tip: enable saved authorization to skip this prompt.",
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            Err(e) => Err(format!("pkexec not available: {}", e)),
+        };
     }
     #[cfg(target_os = "macos")]
     {
-        // macOS: try sudo -n, then osascript with admin privileges
-        let sudo_try = Command::new("sudo").args(["-n", "cp", &tmp_path, HOSTS_PATH]).output();
-        if let Ok(out) = sudo_try {
+        let command = render_command(&args);
+        // a valid sudo ticket means no prompt at all; otherwise the admin dialog authorizes this command
+        if let Ok(out) = Command::new("sudo").args(["-n", "sh", "-c", &command]).output() {
             if out.status.success() {
-                let _ = fs::remove_file(&tmp_path);
                 flush_dns();
                 return Ok(());
             }
         }
-        let script = macos_admin_write_hosts(&tmp_path);
-        let osascript = Command::new("osascript").args(["-e", &script]).output();
-        match osascript {
+        let script = format!(
+            "do shell script \"{}\" with administrator privileges",
+            apple_escape(&command)
+        );
+        return match Command::new("osascript").args(["-e", &script]).output() {
             Ok(out) if out.status.success() => {
-                let _ = fs::remove_file(&tmp_path);
                 flush_dns();
-                return Ok(());
+                Ok(())
             }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                let _ = fs::remove_file(&tmp_path);
-                return Err(format!("macOS admin failed: {} | try running app with sudo or allow in prompt", stderr.trim()));
-            }
-            Err(e) => {
-                let _ = fs::remove_file(&tmp_path);
-                return Err(format!("osascript not available: {}", e));
-            }
-        }
+            Ok(out) => Err(format!(
+                "macOS admin failed: {} | the whole command is authorized in one prompt",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+            Err(e) => Err(format!("osascript not available: {}", e)),
+        };
     }
     #[cfg(target_os = "windows")]
     {
-        // Windows: try direct already failed, need admin. Prompt via PowerShell Start-Process with RunAs
-        // Fallback: instruct to run as Administrator
-        let ps_script = format!("Start-Process -FilePath 'cmd' -ArgumentList '/c copy /Y \"{}\" \"{}\"' -Verb RunAs -Wait", tmp_path.replace('"', "\""), HOSTS_PATH.replace('"', "\""));
-        let ps_try = Command::new("powershell").args(["-Command", &ps_script]).output();
-        if let Ok(out) = ps_try {
-            if out.status.success() {
-                let _ = fs::remove_file(&tmp_path);
+        let encoded = base64_utf16le(&windows_render_script(&args));
+        let ps = format!(
+            "$p = Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+            encoded
+        );
+        return match Command::new("powershell").args(["-NoProfile", "-Command", &ps]).output() {
+            Ok(out) if out.status.success() => {
                 flush_dns();
-                return Ok(());
+                Ok(())
             }
-        }
-        let _ = fs::remove_file(&tmp_path);
-        return Err("hosts write requires Administrator — right-click Focus Block → Run as Administrator, then Start session".to_string());
+            Ok(_) => Err("hosts write needs Administrator — accept the UAC prompt, or run Focus Block as Administrator".to_string()),
+            Err(e) => Err(format!("powershell not available: {}", e)),
+        };
     }
 }
 
@@ -536,63 +683,9 @@ fn current_username() -> Result<String, String> {
 #[tauri::command]
 fn enable_saved_auth() -> Result<String, String> {
     // helper script validates tmp and does cp + flush
-    let helper_content = r#"#!/bin/sh
-# focusblock-helper v2
-# Run as root by the app: `focusblock-apply block <domain>...` or `focusblock-apply clear`.
-# The section is rendered here from validated names, so no caller-supplied bytes reach /etc/hosts and
-# there is no staging file to race, pre-create or symlink.
-set -eu
-
-HOSTS=/etc/hosts
-STAGE=/etc/.focusblock.hosts.new
-MAX_DOMAINS=500
-
-# drop the managed region (current markers and the 0.1.1 BLOCKER2 pair), keep everything else
-strip_block() {
-  awk '
-    /^[[:space:]]*# BEGIN FOCUSBLOCKER[[:space:]]*$/ { skip = 1; next }
-    /^[[:space:]]*# BEGIN BLOCKER2[[:space:]]*$/     { skip = 1; next }
-    /^[[:space:]]*# END FOCUSBLOCKER[[:space:]]*$/   { skip = 0; next }
-    /^[[:space:]]*# END BLOCKER2[[:space:]]*$/       { skip = 0; next }
-    !skip { print }
-  ' "$HOSTS"
-}
-
-case "${1:-}" in
-  block)
-    shift
-    [ "$#" -ge 1 ] || { echo "block needs at least one domain"; exit 1; }
-    [ "$#" -le "$MAX_DOMAINS" ] || { echo "too many domains"; exit 1; }
-    for d in "$@"; do
-      [ -n "$d" ] || { echo "empty domain"; exit 1; }
-      [ "${#d}" -le 253 ] || { echo "domain too long"; exit 1; }
-      case "$d" in
-        *[!a-z0-9.-]*) echo "invalid domain"; exit 1 ;;
-      esac
-    done
-    {
-      strip_block
-      printf '# BEGIN FOCUSBLOCKER\n# Managed by Focus Block - do not edit manually\n'
-      for d in "$@"; do
-        printf '127.0.0.1 %s\n::1 %s\n' "$d" "$d"
-      done
-      printf '# END FOCUSBLOCKER\n'
-    } > "$STAGE"
-    ;;
-  clear)
-    strip_block > "$STAGE"
-    ;;
-  *)
-    echo "usage: focusblock-apply block <domain>... | clear"; exit 1 ;;
-esac
-
-# same filesystem, so this swap is atomic — a crash can't leave a half-written hosts file
-chown root:root "$STAGE"
-chmod 644 "$STAGE"
-mv -f "$STAGE" "$HOSTS"
-resolvectl flush-caches 2>/dev/null || systemd-resolve --flush-caches 2>/dev/null || true
-echo ok
-"#;
+    // Installed verbatim; the identical text is embedded in the macOS admin command, so root renders
+    // the block on every platform and never copies a file this process can still write.
+    let helper_content = RENDER_SCRIPT;
     let user = current_username()?;
 
     // The helper body and the username reach root as argv, never as files. Staging them under /tmp

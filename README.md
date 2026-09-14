@@ -17,11 +17,12 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
 ## How Blocking Works
 
 1. Start merges `globalBlocks + todo.blockedSites` → `expand_sites` (normalize, dedup, alias expand, add `www.` for two-label domains)
-2. Reads `/etc/hosts`, strips old block, builds `build_block_section`, writes via:
-   `try_write_hosts_direct` → `sudo -n helper block <domains…>` → `pkexec cp` (prompt, fallback)
-   The helper takes the domain list, not a file: it validates each name and renders the section itself, so
-   nothing this app can write is handed to root. A 0.1.1-era helper that only accepts a path is still driven
-   in its own protocol until you re-enable, and Settings says so.
+2. Reads `/etc/hosts`, strips the old block, then applies the domain list:
+   `try_write_hosts_direct` → `sudo -n helper block <domains…>` (standing authorization) → prompted write.
+   Every privileged path hands root the **domain names**, never a file. The renderer validates each name
+   and builds the section itself, and it runs *inside* the command being authorized (`pkexec` on Linux,
+   `osascript` on macOS, an encoded PowerShell command on Windows). Nothing this process can write is ever
+   read as root, so there is no staging file to race.
 3. `deactivate_blocks` on timer end / window close (best-effort, and the only implementation of that path) / orphan recovery on next launch
 
 ## Tech Stack
@@ -136,6 +137,8 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 
 - **First Start/End without saved authorization:** `pkexec` dialog (system password)
 - **Saved authorization enabled:** `sudo -n /usr/local/bin/focusblock-apply block <domain>…` (no prompt) and `sudo -n /usr/local/bin/focusblock-apply clear`. The helper validates every name against `a-z0-9.-` and renders the `127.0.0.1` / `::1` lines itself, then swaps the file in with `mv` — it never copies caller-supplied content, so a hostile caller can at most ask to block a domain, and a crash can't leave `/etc/hosts` half-written
+- **Without saved authorization:** the same renderer runs under `pkexec` on Linux — installed or refreshed in the very same authorized command — or embedded in the macOS admin command / an encoded PowerShell command on the others. One prompt per Start/End, same validation, same atomic swap. The one exception is a leftover 0.1.1-era rule, which only understands a file path: that single write is still staged the old way, and re-enabling replaces rule and helper together (Settings says so)
+- **Trust model worth keeping:** the helper accepts `block <domain>…` or `clear` and nothing else, and renders the section from names it validates itself. Any future change that lets caller-supplied *content* become `/etc/hosts` re-opens the whole class of bugs this design removed
 - **Files:** `/usr/local/bin/focusblock-apply` `755`, `/etc/sudoers.d/focusblock` `440`, both `root:root`. One `pkexec` stages the rule, validates it with `visudo -cf`, and only then installs — a rule that does not parse never reaches `sudoers.d`, and a failed install changes nothing. No cron file is installed — `/etc/cron.d/focusblock` only ever appears as a leftover from 0.1.1 and is removed on enable
 - **Check:** `sudo -n -l` should show `(ALL) NOPASSWD: /usr/local/bin/focusblock-apply block *, /usr/local/bin/focusblock-apply clear`; `pkexec cat /etc/sudoers.d/focusblock` to inspect. `head -2 /usr/local/bin/focusblock-apply` should show `# focusblock-helper v2`
 
