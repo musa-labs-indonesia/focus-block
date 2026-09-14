@@ -715,16 +715,26 @@ export default function App() {
     };
   }, [active, activeTodo?.title]);
 
-  // prevent window close while session active (hard block — no escape)
+  // Closing is refused while a session runs or a scheduled window is open. The rust handler enforces it;
+  // this listener only explains why.
+  const windowClosesAt = useMemo(() => {
+    const rule = schedules.find((r) => activeRuleIds.includes(r.id));
+    return rule ? `${String(rule.endHour).padStart(2, "0")}:00` : null;
+  }, [activeRuleIds, schedules]);
+  const closeBlocked = !!active || activeRuleIds.length > 0;
+
   useEffect(() => {
-    if (!active) return;
+    if (!closeBlocked) return;
     let unlisten: (() => void) | undefined;
     try {
       getCurrentWindow()
         .onCloseRequested((event) => {
-          // rust also prevents, this is for toast UX
           event.preventDefault();
-          showToast("Cannot close — session running. Timer must finish. No pause, no escape.");
+          showToast(
+            active
+              ? "Cannot close — session running. Timer must finish. No pause, no escape."
+              : `Cannot close — a scheduled block is open${windowClosesAt ? ` until ${windowClosesAt}` : ""}.`,
+          );
         })
         .then((fn) => (unlisten = fn))
         .catch(() => {});
@@ -737,7 +747,7 @@ export default function App() {
     return () => {
       if (unlisten) unlisten();
     };
-  }, [active]);
+  }, [closeBlocked, active, windowClosesAt]);
 
   // cleanup on unmount: deactivate if we are leaving while active? No, only if timer ended.
   // But if user closes window, Rust will clean via on_window_event.
@@ -1409,7 +1419,7 @@ export default function App() {
                     )}
                   </div>
                   <p className="text-xs text-ink-3">
-                    A window applies while Focus Block is open — closing the app releases it.
+                    A window applies while Focus Block is open, and closing it is refused while one is open.
                     {savedAuth && !savedAuth.enabled && " Without authorization, a change it needs waits for you to press Apply — one password."}
                   </p>
                 </section>

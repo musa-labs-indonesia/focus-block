@@ -32,6 +32,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Closing the app is refused while a scheduled window is open, the same as during a session, so closing is no longer a way out of a window.
 - The interface is rebuilt: ledger rows instead of cards, hairline rules instead of boxes, one accent instead of rainbow chips, and the technical detail moved behind an info tooltip or a collapsed `Technical details` section.
 - Routine confirmations no longer toast; the toast is reserved for what you cannot otherwise see — a privileged write, a refusal, a session outcome.
 - Day-session is now **Saved authorization**, and no longer resets at midnight.

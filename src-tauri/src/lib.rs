@@ -212,6 +212,24 @@ fn wanted_domains(globals: Vec<String>, session_sites: Vec<String>, window_sites
     wanted
 }
 
+/// The local hour, as last reported by the frontend with `sync_blocks`.
+///
+/// Rust has no local time without a timezone crate, and the close guard has to answer "is a scheduled
+/// window open right now". The webview already computes the local hour for the schedule tick, so it hands
+/// it over and this remembers the latest one. `-1` means the app has not synced yet, which holds nothing.
+static LAST_LOCAL_HOUR: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+/// Whether the window is refused the right to close.
+///
+/// One function so the "no escape" promise cannot drift: a running session and an open scheduled window
+/// are the same thing to a user who wants out, and closing must not be a way around either.
+fn close_is_blocked(schedules: &[Schedule], hour: i64, session_end_at: Option<i64>, now: i64) -> bool {
+    if session_end_at.is_some_and(|end| end > now) {
+        return true;
+    }
+    !active_schedule_sites(schedules, hour).is_empty()
+}
+
 fn expand_sites(sites: Vec<String>) -> Vec<String> {
     let mut uniq = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -1047,6 +1065,8 @@ fn sync_blocks(
     session_sites: Vec<String>,
     dry_run: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    // the close guard reads this; see LAST_LOCAL_HOUR
+    LAST_LOCAL_HOUR.store(hour, std::sync::atomic::Ordering::Relaxed);
     let conn = get_conn(&handle)?;
     let schedules = read_schedules(&conn)?;
     let active_ids: Vec<String> = schedules
@@ -1161,30 +1181,30 @@ pub fn run() {
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // hard block: prevent close while session active (no escape)
                 let app_handle = _window.app_handle();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let hour = LAST_LOCAL_HOUR.load(std::sync::atomic::Ordering::Relaxed);
+
+                // hard block: a running session, or an open scheduled window, means no escape
+                let (mut session_end_at, mut schedules) = (None, Vec::new());
                 if let Ok(conn) = get_conn(&app_handle) {
-                    if let Ok(mut stmt) = conn.prepare("SELECT end_at FROM active_session LIMIT 1") {
-                        if let Ok(mut rows) = stmt.query([]) {
-                            if let Ok(Some(row)) = rows.next() {
-                                let end_at: i64 = row.get(0).unwrap_or(0);
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_millis() as i64)
-                                    .unwrap_or(0);
-                                if end_at > now {
-                                    api.prevent_close();
-                                    return;
-                                }
-                            }
-                        }
-                    }
+                    session_end_at = conn
+                        .query_row("SELECT end_at FROM active_session LIMIT 1", [], |row| row.get(0))
+                        .ok();
+                    schedules = read_schedules(&conn).unwrap_or_default();
                 }
+                if close_is_blocked(&schedules, hour, session_end_at, now) {
+                    api.prevent_close();
+                    return;
+                }
+
                 // best-effort hosts cleanup on close — deactivate_blocks owns that logic, including
                 // which helper protocol is installed, so there is only one implementation to trust
                 let _ = deactivate_blocks();
                 // clear active_session so next launch doesn't resume with mismatched hosts
-                let app_handle = _window.app_handle();
                 if let Ok(conn) = get_conn(&app_handle) {
                     let _ = conn.execute("DELETE FROM active_session", []);
                 }
@@ -1434,6 +1454,26 @@ mod tests {
         both.sort();
         both.dedup();
         assert_eq!(both, vec!["reddit.com", "x.com", "youtube.com"]);
+    }
+
+    #[test]
+    fn closing_is_refused_while_a_session_or_a_window_is_open() {
+        let rules = vec![schedule("work", 7, 10, &["x.com"])];
+        let now = 1_000_000;
+
+        // a running session blocks closing, as it always has
+        assert!(close_is_blocked(&[], 12, Some(now + 60_000), now));
+        // and so does a scheduled window, with no session behind it: closing is not a way out of one
+        assert!(close_is_blocked(&rules, 8, None, now));
+        // both at once
+        assert!(close_is_blocked(&rules, 8, Some(now + 60_000), now));
+
+        // nothing holds the window once the session has expired and no rule covers the hour
+        assert!(!close_is_blocked(&rules, 10, None, now));
+        assert!(!close_is_blocked(&rules, 12, Some(now - 1), now));
+        assert!(!close_is_blocked(&rules, 6, None, now));
+        // an unknown local hour (-1, before the first sync) holds nothing rather than trapping the user
+        assert!(!close_is_blocked(&rules, -1, None, now));
     }
 
     // ── what gets handed to root ────────────────────────────────────────────────────────────────

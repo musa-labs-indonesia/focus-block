@@ -12,8 +12,8 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
 - **Domain aliases** — `twitter ↔ x.com ↔ t.co`, `youtube ↔ youtu.be ↔ m.youtube ↔ youtube-nocookie`, `instagram ↔ ig.me`, etc. (Rust `domain_aliases`)
 - **Saved authorization** (Linux) — one password, then no prompts ever: helper `/usr/local/bin/focusblock-apply` + sudoers `/etc/sudoers.d/focusblock`, `sudo -n` path. Persists until disabled; disable restores a password at every Start/End. Removing the package (deb/rpm) removes both; an AppImage has no uninstall hook, so disable it first or delete both paths by hand
 - **SQLite** — `rusqlite 0.31 bundled` at `~/.local/share/com.muhsalaa.focusblock/focusblock.db` (WAL): `todos`, `global_blocks`, `schedules`, `active_session`; migrates once from `localStorage`
-- **Scheduled blocks** — up to 2 daily windows (hour ranges, no overlap) each with its own domains; while a window is open those domains plus your global blocks are blocked
-- **Hard block close** — `CloseRequested` prevented while `active_session.end_at > now` (Rust + frontend `onCloseRequested` toast), orphan hosts auto-recovered on next launch
+- **Scheduled blocks** — up to 2 daily windows (hour ranges, no overlap) each with its own domains; while a window is open those domains plus your global blocks are blocked, and closing the app is refused until it ends
+- **Hard block close** — `CloseRequested` prevented while a session runs **or** a scheduled window is open (`close_is_blocked` in Rust, plus a frontend toast naming when the window ends), orphan hosts auto-recovered on next launch
 - **Reject → no session** — if `pkexec`/`sudo` rejected, `activate_blocks` fails and session does not start
 
 ## How Blocking Works
@@ -25,7 +25,7 @@ Deep work timer that actually blocks distractions. Create tasks with a duration 
    and builds the section itself, and it runs *inside* the command being authorized (`pkexec` on Linux,
    `osascript` on macOS, an encoded PowerShell command on Windows). Nothing this process can write is ever
    read as root, so there is no staging file to race.
-3. `deactivate_blocks` on timer end / window close (best-effort, and the only implementation of that path) / orphan recovery on next launch
+3. `deactivate_blocks` on timer end, or on close once neither a session nor a window is holding the app (best-effort, and the only implementation of that path); orphan recovery on next launch
 4. Every 30s, and after any change, `sync_blocks` recomputes what should be blocked — global blocks ∪ running
    session ∪ open scheduled windows — and writes only if the file would actually differ. So a scheduled
    window opens and closes by itself, a tick that changes nothing costs nothing, and startup cleanup can
@@ -123,7 +123,7 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
 3. **Start** — `Start` on a task merges the global and per-task lists → one password prompt (none if authorization is enabled) → the timer takes over the top of the view, the list locks, and closing is refused
 4. **Finish** — the block is released by the same writer that opened it, and the toast says what is left blocked (usually nothing, unless a scheduled window is open)
 5. **Authorization** — Settings → `Authorization` → `Enable` → one `pkexec` → installs the helper at `/usr/local/bin/focusblock-apply` and the rule at `/etc/sudoers.d/focusblock`. No password from then on, until you press `Disable` (which removes both files). No cron job is installed — the old `0 0 * * *` reset is deleted when you enable. The mechanism sits behind the ⓘ next to the status line
-6. **Scheduled blocks** — Settings → `Scheduled blocks` → `Add window` → pick an hour range and add sites. Up to 2, and they cannot overlap; while one is open its sites and your global list are blocked, and the window shows `blocked now`. Focus Block has to stay open — closing it releases the block
+6. **Scheduled blocks** — Settings → `Scheduled blocks` → `Add window` → pick an hour range and add sites. Up to 2, and they cannot overlap; while one is open its sites and your global list are blocked, and the window shows `blocked now`. Focus Block has to stay open, and **closing it is refused while a window is open** — the same no-escape rule as a session
 7. **Search** — Focus → `Find a task` filters the ledger by title
 8. **Edit/Delete** — the pencil and X on each row are disabled during a session, and the running task cannot be edited or deleted
 9. **Technical details** — the raw `/etc/hosts` region, marker names, platform and helper version live in Settings → `Technical details`, collapsed by default. Nothing there needs attention unless you are troubleshooting
@@ -141,7 +141,7 @@ Blocking works the same as Linux (`/etc/hosts`), but the macOS privilege path is
   sqlite3 ~/.local/share/com.muhsalaa.focusblock/focusblock.db "select * from todos; select * from global_blocks; select * from active_session;"
   ```
 - **Migration:** if `todos`+`global_blocks`+`active_session` empty but `localStorage` has `focusblock_todos`/`focusblock_global_blocks`/`focusblock_active_session`, migrates once via `sync_todos`/`set_global_blocks`/`save_active_session` (fallback to `localStorage` when not in Tauri, e.g. `npm run dev`).
-- **Hosts:** `/etc/hosts` block `# BEGIN FOCUSBLOCKER` managed, never edit manually; cleared on finish, on close (best-effort: saved-auth helper, then `pkexec`), or on next launch orphan recovery.
+- **Hosts:** `/etc/hosts` block `# BEGIN FOCUSBLOCKER` managed, never edit manually; cleared on finish, on close when nothing is holding the window (best-effort: saved-auth helper, then `pkexec`), on uninstall, or by the next launch's orphan recovery.
 - **Old localStorage keys** kept for fallback only — not source of truth after first Tauri launch.
 
 ## Permissions
