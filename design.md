@@ -29,8 +29,10 @@ The catalog's macrostructures are landing-page shapes, so they are borrowed here
   (timer digits · what is blocked · when it ends) occupies the top of the view and the task list
   becomes a locked ledger under it. Idle, the instrument collapses to a single status line and the
   task list leads.
-- **App view (Settings)** — *document sheet*. A single readable column (~68ch), groups separated by
-  hairline rules with a small caps label. No cards, no borders on rows.
+- **App view (Settings)** — *document sheet, two columns*. Grouped sections separated by hairline rules
+  with a small caps label, in two columns from 1024px up and one column below that. Each column is ~530px,
+  which keeps prose near a readable measure without leaving half the window empty. No cards, no borders on
+  rows.
 - **Modal (task editor)** — a raised sheet on a scrim: label above field, one column, no nested boxes.
 
 Tasks are a **ledger (list)**, not a card grid: title, duration, domains, actions on one row with a
@@ -121,7 +123,7 @@ live region for toasts, `role="alert"` for errors, 44px hit targets, 3px focus r
 
 ## What views MAY differ on
 
-- Density: Focus uses a ledger row per task; Settings uses a document column.
+- Density: Focus uses a ledger row per task; Settings uses a two-column document with grouped sections.
 - Whether the live instrument is expanded (Focus, session running) or collapsed (Focus, idle).
 - Diagnostics depth: Settings may show a collapsed disclosure; Focus never shows one.
 

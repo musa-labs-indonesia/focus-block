@@ -1188,7 +1188,7 @@ export default function App() {
           </section>
         ) : (
           <section
-            className={`mt-6 flex flex-wrap items-center justify-between gap-3 border-b border-rule pb-3 ${page === "settings" ? "max-w-[68ch]" : ""}`}
+            className="mt-6 flex flex-wrap items-center justify-between gap-3 border-b border-rule pb-3"
             aria-label="Session status"
           >
             <p className="flex items-center gap-2 text-sm text-ink-2">
@@ -1339,7 +1339,7 @@ export default function App() {
           </>
         ) : (
           <>
-            <div className="mt-8 max-w-[68ch] space-y-10">
+            <div className="mt-8 grid gap-x-10 gap-y-10 lg:grid-cols-2">
               <section className="space-y-4" aria-labelledby="global-blocks-heading">
                 <SectionLabel id="global-blocks-heading">Blocking</SectionLabel>
                 <p className="text-sm text-ink-2">
@@ -1381,7 +1381,6 @@ export default function App() {
                 </div>
               </section>
 
-              <div className="space-y-10">
                 <section className="space-y-4" aria-labelledby="saved-auth-heading">
                   <SectionLabel id="saved-auth-heading">Authorization</SectionLabel>
                   <p className="flex flex-wrap items-center gap-2 text-sm text-ink-2">
@@ -1526,6 +1525,7 @@ export default function App() {
                   </p>
                 </section>
 
+                <div className="space-y-10">
                 <section className="space-y-3" aria-labelledby="hosts-heading">
                   <SectionLabel id="hosts-heading">Technical details</SectionLabel>
                   <p className="text-sm text-ink-2">
@@ -1552,16 +1552,16 @@ export default function App() {
                     </div>
                   </details>
                 </section>
-              </div>
 
-              <section className="space-y-3" aria-labelledby="help-heading">
+              <section className="space-y-3 lg:col-span-2" aria-labelledby="help-heading">
                 <SectionLabel id="help-heading">How it works</SectionLabel>
-                <ol className="ml-4 list-decimal space-y-1.5 text-sm text-ink-2">
+                <ol className="ml-4 max-w-[62ch] list-decimal space-y-1.5 text-sm text-ink-2">
                   <li>Pick a task. Focus Block hides its sites until the timer runs out.</li>
                   <li>Every browser is covered, including tabs you already have open.</li>
                   <li>When the timer ends, the sites come back.</li>
                 </ol>
               </section>
+                </div>
             </div>
           </>
         )}
