@@ -7,6 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-14
+
+### Changed
+
+- The schedule editor and the authorization toggle are locked while a session runs or a schedule is blocking; the global block list stays editable, because adding to it is the only way to block more mid-session.
+- A schedule that is blocking right now can only grow: sites can be added, but its hours, its sites and its removal wait until it ends.
+- Settings uses the full window width in two columns instead of one narrow column.
+- A scheduled block is called a *schedule* everywhere in the interface; "window" now means only the application window.
+
+### Fixed
+
+- A refused change in the schedule editor drew a full-width red alert where a 16px icon belonged, which also closed any hour dropdown that was open.
+- Setting a schedule's hours no longer requires picking them in a particular order: raising the start onto its end carries the end along.
+
 ## [0.2.0] - 2026-09-14
 
 ### Added
@@ -103,6 +117,7 @@ First release.
 - The released macOS build is not notarized (no Apple Developer account), so Gatekeeper blocks the
   first launch. Right-click → Open, or `xattr -dr com.apple.quarantine "/Applications/FocusBlock.app"`.
 
-[Unreleased]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/musa-labs-indonesia/focus-block/releases/tag/v0.1.1
