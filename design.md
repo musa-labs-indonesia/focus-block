@@ -30,9 +30,9 @@ The catalog's macrostructures are landing-page shapes, so they are borrowed here
   becomes a locked ledger under it. Idle, the instrument collapses to a single status line and the
   task list leads.
 - **App view (Settings)** — *document sheet, two columns*. Grouped sections separated by hairline rules
-  with a small caps label, in two columns from 1024px up and one column below that. Each column is ~530px,
-  which keeps prose near a readable measure without leaving half the window empty. No cards, no borders on
-  rows.
+  with a small caps label, in two columns from 1024px up and one column below that. Each column is ~506px,
+  and the single-column layout keeps the same ~68ch measure on the text, so prose stays near a readable
+  measure without leaving half the window empty. No cards, no borders on rows.
 - **Modal (task editor)** — a raised sheet on a scrim: label above field, one column, no nested boxes.
 
 Tasks are a **ledger (list)**, not a card grid: title, duration, domains, actions on one row with a

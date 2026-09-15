@@ -7,6 +7,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-15
+
+### Fixed
+
+- A schedule with no sites of its own blocked nothing at all — and, because the global list was only folded in when the schedule had sites, it silently suppressed the global list for its whole window. A 5:00-9:00 schedule now blocks the global list, as the interface and this file have always said it would.
+- A blocking schedule could be shortened or removed in the first 30 seconds of its window: the rule was judged against the hour the last tick reported, not the clock the click happened at. The editor's own hour now travels with the write, and the editor locks on the wall clock.
+- The "can only grow" rule was weaker than it read: a range could be pulled in while it was open (07:00-10:00 shortened to 07:00-09:00 at 08:00 released an hour of the block early). Hours may now only move outward while a schedule is blocking.
+- A refused schedule edit left the editor showing the change the backend had rejected. The interface now re-reads what is stored and says why.
+- A refused list was cached in browser-dev `localStorage`, which could resurrect schedules the backend had rejected on a later launch.
+- `Refresh` only re-read three things, so it could not release a lock left stale by a tick that had stopped succeeding. It now recomputes the blocking state.
+- Settings below 1024px lost its reading measure, so prose ran the full window width.
+- The blocked count contradicted itself: the status lines counted distinct hostnames (16 for a 9-site list) while toasts reported the expanded list (29). Every count in the main view is now the sites you configured — the header no longer repeats a count of its own — and Technical details shows the mapping from those sites to the hostnames in the file.
+- Smaller: the authorization tooltip could overflow the window, and the locked schedule controls named the wrong reason while a session was running.
+
+### Changed
+
+- The last "scheduled window" string and the backend's refusal messages now say *schedule*, finishing the 0.2.1 rename.
+- A schedule that is blocking right now can gain sites from the editor again (it could not in 0.2.1, although this file said it could).
+
 ## [0.2.1] - 2026-09-14
 
 ### Changed
@@ -27,8 +46,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - macOS `.dmg` built in CI as a universal binary (Apple Silicon + Intel).
 - Global blocks can be added while a block is running — a session or a scheduled window — and removing one waits until that block ends, so a block can only ever get stricter.
-- A schedule that is blocking right now can only grow: sites can be added to it, but its hours, its sites and its removal wait until it ends.
-- The schedule editor and the authorization toggle are locked while a session runs or a schedule is blocking; the global block list stays editable, since adding to it is the one way to block more mid-session.
 - Scheduled blocks: up to two non-overlapping daily hour windows, each with its own domains, enforced while the app is open.
 - A locked design system (`design.md` + `tokens.css`): OKLCH light and dark palettes, Space Grotesk / Inter / JetBrains Mono bundled, hand-drawn icons.
 - Ad-hoc signing for the macOS bundle, so Gatekeeper says "unidentified developer" instead of "damaged".
@@ -117,7 +134,8 @@ First release.
 - The released macOS build is not notarized (no Apple Developer account), so Gatekeeper blocks the
   first launch. Right-click → Open, or `xattr -dr com.apple.quarantine "/Applications/FocusBlock.app"`.
 
-[Unreleased]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/musa-labs-indonesia/focus-block/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/musa-labs-indonesia/focus-block/releases/tag/v0.1.1
