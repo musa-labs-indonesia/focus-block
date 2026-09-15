@@ -47,6 +47,11 @@ function uid() {
   return Math.random().toString(36).slice(2, 9) + Date.now().toString(36);
 }
 
+/** Half-open hour window, the same arithmetic the backend uses: 5 to 9 blocks 05:00-08:59. */
+function inWindow(rule: { startHour: number; endHour: number }, hour: number) {
+  return rule.startHour <= hour && hour < rule.endHour;
+}
+
 function formatTime(sec: number) {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
@@ -201,7 +206,7 @@ function Info({ label, children }: { label: string; children: React.ReactNode })
         <span
           id={id}
           role="tooltip"
-          className="absolute left-0 top-8 z-40 w-[min(20rem,80vw)] rounded-md border border-rule bg-paper p-3 text-xs font-normal leading-relaxed text-ink-2 shadow-lg"
+          className="absolute right-0 top-8 z-40 w-[min(20rem,80vw)] rounded-md border border-rule bg-paper p-3 text-xs font-normal leading-relaxed text-ink-2 shadow-lg"
         >
           {children}
         </span>
@@ -295,6 +300,9 @@ export default function App() {
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [ruleInputs, setRuleInputs] = useState<Record<string, string>>({});
   const [activeRuleIds, setActiveRuleIds] = useState<string[]>([]);
+  // The wall clock, refreshed on every tick: the editor has to lock at 07:00 sharp, not up to 30 seconds
+  // later when the backend's answer arrives.
+  const [clockHour, setClockHour] = useState(() => new Date().getHours());
   const [savedAuth, setSavedAuth] = useState<{ enabled: boolean; platform: string; helper_version: number } | null>(null);
   const [page, setPage] = useState<"focus" | "settings">("focus");
   const [hostsPreview, setHostsPreview] = useState<string | null>(null);
@@ -318,6 +326,18 @@ export default function App() {
   // Sites the app wants blocked but cannot write without a password: reported in a banner instead of
   // being prompted for on a timer. `null` = nothing pending, `0` = a clear is pending.
   const [pendingSites, setPendingSites] = useState<number | null>(null);
+  // bumped by Refresh so the tick effect re-runs on demand
+  const [syncTick, setSyncTick] = useState(0);
+  // What you configured and what that became in /etc/hosts are two different numbers, so the backend
+  // reports the configured list and the file reports the hostnames. The main view shows the first one — the
+  // number you can count in Settings — and Technical details shows the mapping between them.
+  const [configuredSites, setConfiguredSites] = useState<string[]>([]);
+
+  /** One place that takes a `sync_blocks` answer, so every counter moves together. */
+  function noteSync(res: { sites: string[]; activeRuleIds?: string[] }) {
+    setConfiguredSites(res.sites);
+    if (res.activeRuleIds) setActiveRuleIds(res.activeRuleIds);
+  }
 
   const appContentRef = useRef<HTMLDivElement>(null);
   const modalRef = useRef<HTMLFormElement>(null);
@@ -500,24 +520,43 @@ export default function App() {
   }, [todos, dbLoaded]);
   useEffect(() => {
     if (!dbLoaded) return;
-    invoke("set_global_blocks", { sites: globalBlocks }).catch((e) => {
+    invoke("set_global_blocks", { sites: globalBlocks, hour: new Date().getHours() }).catch((e) => {
+      // outside Tauri this always fails (an Error, not a string); a string means the backend refused it,
+      // and a refused list must not be cached — the one in force is the one already on disk
+      if (typeof e === "string" && e.length > 0) {
+        showToast(e.slice(0, 160));
+        invoke<string[]>("get_global_blocks")
+          .then((stored) => {
+            if (JSON.stringify(stored) !== JSON.stringify(globalBlocks)) setGlobalBlocks(stored);
+          })
+          .catch(() => {});
+        return;
+      }
       try {
         localStorage.setItem(STORAGE_GLOBAL, JSON.stringify(globalBlocks));
       } catch {}
-      // outside Tauri this always fails (an Error, not a string); a string means the backend refused it
-      if (typeof e === "string" && e.length > 0) showToast(e.slice(0, 160));
     });
   }, [globalBlocks, dbLoaded]);
   useEffect(() => {
     if (!dbLoaded) return;
-    // the backend validates as well; a rejected list (overlap, too many) is reported and the previously
-    // stored one stays in force
-    invoke("save_schedules", { schedules }).catch((e) => {
+    // the backend validates as well; a rejected list (overlap, too many, or a weakening edit while a
+    // schedule is blocking) is reported and the previously stored one stays in force — so put the UI back
+    // onto what is actually stored instead of leaving the two disagreeing. The hour goes with the write:
+    // the guard has to judge the click against the clock the user clicked at, not the last tick.
+    invoke("save_schedules", { schedules, hour: new Date().getHours() }).catch((e) => {
+      if (typeof e === "string" && e.length > 0) {
+        showToast(`Scheduled blocks were not saved: ${e.slice(0, 120)}`);
+        invoke<Schedule[]>("get_schedules")
+          .then((stored) => {
+            if (JSON.stringify(stored) !== JSON.stringify(schedules)) setSchedules(stored);
+          })
+          .catch(() => {});
+        return;
+      }
       // browser dev has no backend: keep them locally so the same screen can be exercised there
       try {
         localStorage.setItem(STORAGE_SCHEDULES, JSON.stringify(schedules));
       } catch {}
-      if (typeof e === "string" && e.length > 0) showToast(`Scheduled blocks were not saved: ${e.slice(0, 120)}`);
     });
   }, [schedules, dbLoaded]);
 
@@ -536,14 +575,16 @@ export default function App() {
         // A tick never prompts. Without saved authorization it only *reports* what a write would change
         // and the banner below offers one click; with it, the write happens silently as before.
         const quiet = savedAuth?.enabled === true;
-        const res = await invoke<{ changed: boolean; blocked: number; activeRuleIds: string[] }>("sync_blocks", {
-          hour: new Date().getHours(),
+        const hour = new Date().getHours();
+        const res = await invoke<{ changed: boolean; sites: string[]; activeRuleIds: string[] }>("sync_blocks", {
+          hour,
           sessionSites: sessionSitesRef.current,
           dryRun: !quiet,
         });
         if (cancelled) return;
-        setActiveRuleIds(res.activeRuleIds);
-        setPendingSites(!quiet && res.changed ? res.blocked : null);
+        setClockHour(hour);
+        noteSync(res);
+        setPendingSites(!quiet && res.changed ? res.sites.length : null);
         if (res.changed && quiet) {
           await refreshBlockStatus();
           await refreshHostsPreview();
@@ -556,21 +597,25 @@ export default function App() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [dbLoaded, schedules, globalBlocks, active, savedAuth?.enabled]);
+  }, [dbLoaded, schedules, globalBlocks, active, savedAuth?.enabled, syncTick]);
 
   /** The one write that is allowed to ask: the user pressed a button that says so. */
   async function applyPending() {
     try {
-      const res = await invoke<{ changed: boolean; blocked: number; activeRuleIds: string[] }>("sync_blocks", {
+      const res = await invoke<{ changed: boolean; sites: string[]; activeRuleIds: string[] }>("sync_blocks", {
         hour: new Date().getHours(),
         sessionSites: sessionSitesRef.current,
         dryRun: false,
       });
-      setActiveRuleIds(res.activeRuleIds);
+      noteSync(res);
       setPendingSites(null);
       await refreshBlockStatus();
       await refreshHostsPreview();
-      showToast(res.blocked === 0 ? "Blocks cleared." : `Blocking ${res.blocked} ${res.blocked === 1 ? "site" : "sites"}.`);
+      showToast(
+        res.sites.length === 0
+          ? "Blocks cleared."
+          : `Blocking ${res.sites.length} ${res.sites.length === 1 ? "site" : "sites"}.`,
+      );
     } catch (e: any) {
       // a refused password leaves the banner in place; nothing retries on its own
       showToast(`Could not apply the block: ${String(e).slice(0, 120)}`);
@@ -610,7 +655,7 @@ export default function App() {
           // may legitimately be running right now, in which case the block is not an orphan
           try {
             const quiet = savedAuth?.enabled === true;
-            const res = await invoke<{ changed: boolean; blocked: number }>("sync_blocks", {
+            const res = await invoke<{ changed: boolean; sites: string[] }>("sync_blocks", {
               hour: new Date().getHours(),
               sessionSites: [],
               dryRun: !quiet,
@@ -619,13 +664,13 @@ export default function App() {
               await refreshBlockStatus();
               await refreshHostsPreview();
               showToast(
-                res.blocked === 0
+                res.sites.length === 0
                   ? "Leftover block from a previous session cleared"
-                  : `A schedule is still holding ${res.blocked} ${res.blocked === 1 ? "site" : "sites"}`,
+                  : `A schedule is still holding ${res.sites.length} ${res.sites.length === 1 ? "site" : "sites"}`,
               );
             } else if (res.changed) {
               // cleaning up needs a password, so leave it to the banner rather than prompting here
-              setPendingSites(res.blocked);
+              noteSync(res);
             }
           } catch (e: any) {
             showToast(`Could not clean up the leftover block: ${String(e).slice(0, 120)} — clear manually in Settings`);
@@ -729,16 +774,16 @@ export default function App() {
         // The same writer that opened the session closes it: sync_blocks recomputes the union without
         // this session, so a schedule that is blocking right now keeps its domains instead of being
         // wiped by a blind clear, and the toast reports what was actually written.
-        invoke<{ changed: boolean; blocked: number; activeRuleIds: string[] }>("sync_blocks", {
+        invoke<{ changed: boolean; sites: string[]; activeRuleIds: string[] }>("sync_blocks", {
           hour: new Date().getHours(),
           sessionSites: [],
         })
           .then((res) => {
-            setActiveRuleIds(res.activeRuleIds);
+            noteSync(res);
             setToast(
-              res.blocked === 0
+              res.sites.length === 0
                 ? `“${activeTodo?.title || "Task"}” is complete. Blocks cleared.`
-                : `“${activeTodo?.title || "Task"}” is complete. ${res.blocked} ${res.blocked === 1 ? "site" : "sites"} still blocked by a scheduled window.`,
+                : `“${activeTodo?.title || "Task"}” is complete. ${res.sites.length} ${res.sites.length === 1 ? "site" : "sites"} still blocked by a schedule.`,
             );
           })
           .catch((e) => setToast(`Session ended, but blocks were not cleared: ${String(e).slice(0, 120)}`));
@@ -755,12 +800,18 @@ export default function App() {
   // Closing is refused while a session runs or a schedule is blocking. The rust handler enforces it;
   // this listener only explains why.
   const scheduleEndsAt = useMemo(() => {
-    const rule = schedules.find((r) => activeRuleIds.includes(r.id));
+    const rule = schedules.find((r) => inWindow(r, clockHour) || activeRuleIds.includes(r.id));
     return rule ? `${String(rule.endHour).padStart(2, "0")}:00` : null;
-  }, [activeRuleIds, schedules]);
+  }, [activeRuleIds, schedules, clockHour]);
   // A session or a schedule that is blocking right now: it refuses to let the app close, and it freezes the
-  // schedule editor. One flag, used for both, so the two cannot drift apart.
-  const blockedNow = !!active || activeRuleIds.length > 0;
+  // schedule editor. One flag, used for both, so the two cannot drift apart. The wall clock is part of the
+  // answer so the lock lands on the hour instead of waiting for the backend's reply.
+  const blockedNow = !!active || activeRuleIds.length > 0 || schedules.some((r) => inWindow(r, clockHour));
+  /** Hostnames actually in `/etc/hosts` right now — the count Technical details and the status line report. */
+  const hostnamesBlocked = blockStatus?.active ? blockStatus.sites.length : 0;
+  /** Whether *this* rule is the reason the editor is locked — the one case that may still gain sites. */
+  const ruleBlocksNow = (id: string) =>
+    activeRuleIds.includes(id) || schedules.some((r) => r.id === id && inWindow(r, clockHour));
   const lockedBecause = active ? "a session is running" : "a schedule is blocking";
   const lockedToast = `The schedule editor is locked while ${lockedBecause}.`;
   // globals keep their own, looser rule: adding one mid-block is the only way to add a site while
@@ -894,7 +945,10 @@ export default function App() {
     commitSchedules(schedules.filter((r) => r.id !== id));
   }
   function addRuleSite(id: string) {
-    if (blockedNow) {
+    // Locked for some other reason (a session, another schedule) — but the one edit a blocking schedule
+    // still accepts is this: adding a site only ever makes the block stricter, and the backend allows it
+    // (check_schedules_change refuses removals, not additions).
+    if (blockedNow && !ruleBlocksNow(id)) {
       showToast(lockedToast);
       return;
     }
@@ -1033,12 +1087,12 @@ export default function App() {
     // privileged write when the file already says this, so a start that changes nothing costs nothing.
     // No block = no session: a rejected write, or a list where nothing survives validation, aborts.
     try {
-      const res = await invoke<{ changed: boolean; blocked: number; activeRuleIds: string[] }>("sync_blocks", {
+      const res = await invoke<{ changed: boolean; sites: string[]; activeRuleIds: string[] }>("sync_blocks", {
         hour: new Date().getHours(),
         sessionSites: merged,
       });
-      setActiveRuleIds(res.activeRuleIds);
-      if (merged.length > 0 && res.blocked === 0) {
+      noteSync(res);
+      if (merged.length > 0 && res.sites.length === 0) {
         showToast("Nothing in that list is a usable domain — session not started");
         return;
       }
@@ -1093,12 +1147,6 @@ export default function App() {
               </NavTab>
             </nav>
             <div className="ml-auto flex items-center gap-2">
-              {blockStatus && (
-                <span className="mr-2 hidden items-center gap-2 text-xs text-ink-2 lg:flex">
-                  <StatusDot tone={blockStatus.active ? "accent" : "muted"} />
-                  {blockStatus.active ? `${blockStatus.sites.length} site${blockStatus.sites.length === 1 ? "" : "s"} blocked` : "Nothing blocked"}
-                </span>
-              )}
               <button
                 type="button"
                 onClick={() => setDark((v) => !v)}
@@ -1191,10 +1239,13 @@ export default function App() {
             className="mt-6 flex flex-wrap items-center justify-between gap-3 border-b border-rule pb-3"
             aria-label="Session status"
           >
-            <p className="flex items-center gap-2 text-sm text-ink-2">
+            <p
+              className="flex items-center gap-2 text-sm text-ink-2"
+              title={blockStatus?.active ? `${hostnamesBlocked} hostnames in /etc/hosts — see Settings → Technical details` : undefined}
+            >
               <StatusDot tone={blockStatus?.active ? "accent" : "muted"} />
               {blockStatus?.active
-                ? `${blockStatus.sites.length} ${blockStatus.sites.length === 1 ? "site" : "sites"} blocked right now`
+                ? `${configuredSites.length} ${configuredSites.length === 1 ? "site" : "sites"} blocked right now`
                 : "Nothing is blocked right now"}
             </p>
             <p className="text-xs text-ink-3">
@@ -1240,7 +1291,7 @@ export default function App() {
                     <span aria-hidden="true" className="h-3 w-px bg-rule-2" />
                   </>
                 )}
-                <span>{blockStatus?.active ? `${blockStatus.sites.length} blocked now` : "idle"}</span>
+                <span>{blockStatus?.active ? `${configuredSites.length} blocked now` : "idle"}</span>
               </p>
             </div>
 
@@ -1339,7 +1390,7 @@ export default function App() {
           </>
         ) : (
           <>
-            <div className="mt-8 grid gap-x-10 gap-y-10 lg:grid-cols-2">
+            <div className="mt-8 grid max-w-[68ch] gap-10 lg:max-w-none lg:grid-cols-2">
               <section className="space-y-4" aria-labelledby="global-blocks-heading">
                 <SectionLabel id="global-blocks-heading">Blocking</SectionLabel>
                 <p className="text-sm text-ink-2">
@@ -1414,6 +1465,9 @@ export default function App() {
                     <Button
                       variant="quiet"
                       onClick={() => {
+                        // a real recompute, not three reads: this is the manual escape from a lock that is
+                        // only still there because the tick stopped succeeding
+                        setSyncTick((n) => n + 1);
                         refreshBlockStatus();
                         refreshSavedAuth();
                         refreshHostsPreview();
@@ -1434,8 +1488,9 @@ export default function App() {
                     are blocked. They cannot overlap.
                   </p>
                   {blockedNow && (
-                    <p className="text-xs text-ink-3">
-                      Locked while {lockedBecause}. Nothing here changes until it ends.
+                    <p id="schedule-lock" role="status" className="text-xs text-ink-3">
+                      Locked while {lockedBecause}. A schedule that is blocking can still gain sites — its hours,
+                      its sites and its removal wait until it ends.
                     </p>
                   )}
                   {scheduleError && (
@@ -1444,25 +1499,30 @@ export default function App() {
                       {scheduleError}
                     </p>
                   )}
-                  <div className="space-y-5">
+                  <div className="space-y-5" role="group" aria-describedby={blockedNow ? "schedule-lock" : undefined}>
                     {schedules.map((rule) => {
-                      // per rule: is *this* schedule the one holding the block right now (the badge)
-                      const blockingNow = activeRuleIds.includes(rule.id);
-                      // Every control in this card keys on the section flag, not on this rule's own state: a
-                      // session freezes the whole editor, including schedules that are not blocking. (This
-                      // used to shadow the section's `blockedNow` with the per-rule value, which quietly
-                      // left idle schedules editable during a session.)
+                      // per rule: is *this* schedule the one holding the block right now (the badge). The wall
+                      // clock counts too, so the lock lands on the hour rather than up to a tick later.
+                      const blockingNow = activeRuleIds.includes(rule.id) || inWindow(rule, clockHour);
+                      // Every other control in this card keys on the section flag, not on this rule's own
+                      // state: a session freezes the whole editor, including schedules that are not blocking.
+                      // (This used to shadow the section's `blockedNow` with the per-rule value, which
+                      // quietly left idle schedules editable during a session.)
                       const editable = !blockedNow;
+                      // The documented exception: a schedule that is blocking right now may still gain sites.
+                      const canGrow = blockingNow;
+                      const lockedTitle = editable ? undefined : `Locked while ${lockedBecause}`;
+                      const growTitle = "Adding a site is allowed while this schedule is blocking";
                       return (
                         <div key={rule.id} className="space-y-3 border-t border-rule pt-3">
                           <div className="flex flex-wrap items-center gap-2">
                             <label htmlFor={`start-${rule.id}`} className="sr-only">Start hour</label>
-                            <select id={`start-${rule.id}`} value={rule.startHour} onChange={(e) => updateRule(rule.id, { startHour: Number(e.target.value) })} disabled={!editable} title={editable ? undefined : "Its hours wait until this schedule ends"} className="tabular rounded-md border border-rule-2 bg-paper px-2 py-2 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent disabled:opacity-45">
+                            <select id={`start-${rule.id}`} value={rule.startHour} onChange={(e) => updateRule(rule.id, { startHour: Number(e.target.value) })} disabled={!editable} title={lockedTitle} className="tabular rounded-md border border-rule-2 bg-paper px-2 py-2 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent disabled:opacity-45">
                               {START_HOURS.map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
                             </select>
                             <span className="text-sm text-ink-3">to</span>
                             <label htmlFor={`end-${rule.id}`} className="sr-only">End hour</label>
-                            <select id={`end-${rule.id}`} value={rule.endHour} onChange={(e) => updateRule(rule.id, { endHour: Number(e.target.value) })} disabled={!editable} title={editable ? undefined : "Its hours wait until this schedule ends"} className="tabular rounded-md border border-rule-2 bg-paper px-2 py-2 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent disabled:opacity-45">
+                            <select id={`end-${rule.id}`} value={rule.endHour} onChange={(e) => updateRule(rule.id, { endHour: Number(e.target.value) })} disabled={!editable} title={lockedTitle} className="tabular rounded-md border border-rule-2 bg-paper px-2 py-2 text-sm text-ink outline-none transition-colors duration-150 focus:border-accent disabled:opacity-45">
                               {END_HOURS.map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
                             </select>
                             <span className="text-sm text-ink-3">every day</span>
@@ -1476,7 +1536,7 @@ export default function App() {
                               className="ml-auto px-2 text-xs"
                               onClick={() => removeRule(rule.id)}
                               disabled={!editable}
-                              title={editable ? undefined : "Removing waits until this schedule ends"}
+                              title={lockedTitle}
                             >
                               Remove
                             </Button>
@@ -1484,9 +1544,9 @@ export default function App() {
                           <div className="flex flex-wrap items-start gap-2">
                             <div className="min-w-0 flex-1">
                               <label htmlFor={`site-${rule.id}`} className="sr-only">Site for this schedule</label>
-                              <input id={`site-${rule.id}`} type="text" autoComplete="off" value={ruleInputs[rule.id] ?? ""} onChange={(e) => setRuleInputs((p) => ({ ...p, [rule.id]: e.target.value }))} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addRuleSite(rule.id))} placeholder="x.com" disabled={!editable} className="w-full rounded-md border border-rule-2 bg-paper px-3 py-2.5 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-ink-3 focus:border-accent disabled:opacity-45" />
+                              <input id={`site-${rule.id}`} type="text" autoComplete="off" value={ruleInputs[rule.id] ?? ""} onChange={(e) => setRuleInputs((p) => ({ ...p, [rule.id]: e.target.value }))} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addRuleSite(rule.id))} placeholder="x.com" disabled={!editable && !canGrow} title={!editable && canGrow ? growTitle : lockedTitle} className="w-full rounded-md border border-rule-2 bg-paper px-3 py-2.5 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-ink-3 focus:border-accent disabled:opacity-45" />
                             </div>
-                            <Button variant="secondary" onClick={() => addRuleSite(rule.id)} disabled={!editable}>Add</Button>
+                            <Button variant="secondary" onClick={() => addRuleSite(rule.id)} disabled={!editable && !canGrow} title={!editable && canGrow ? growTitle : lockedTitle}>Add</Button>
                           </div>
                           <div className="flex flex-wrap items-center gap-1.5">
                             {rule.sites.length === 0 ? (
@@ -1500,7 +1560,7 @@ export default function App() {
                                     onClick={() => removeRuleSite(rule.id, s)}
                                     disabled={!editable}
                                     aria-label={`Remove ${s} from this schedule`}
-                                    title={editable ? `Remove ${s}` : "Removing waits until this schedule ends"}
+                                    title={editable ? `Remove ${s}` : lockedTitle}
                                     className="compact-hit grid place-items-center rounded-sm text-ink-3 transition-colors duration-150 hover:text-danger disabled:opacity-45"
                                   >
                                     <Icon name="close" size="sm" />
@@ -1534,7 +1594,7 @@ export default function App() {
                   </p>
                   <details className="mt-1">
                     <summary className="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-ink-2 transition-colors duration-150 hover:text-ink">
-                      <span className="tabular">{blockStatus?.active ? `${blockStatus.sites.length} blocked` : "nothing blocked"}</span>
+                      <span className="tabular">{blockStatus?.active ? `${hostnamesBlocked} hostnames` : "nothing blocked"}</span>
                       <span className="text-ink-3">· show the file Focus Block manages</span>
                     </summary>
                     <div className="mt-4 space-y-3">
@@ -1544,7 +1604,22 @@ export default function App() {
                         {savedAuth?.platform ? ` System: ${savedAuth.platform}.` : ""}
                         {savedAuth?.helper_version ? ` Helper protocol: v${savedAuth.helper_version}.` : ""}
                       </p>
-                      <p className="text-xs text-ink-3">Blocked right now: {blockStatus?.sites.join(", ") || "none"}</p>
+                      {blockStatus?.active ? (
+                        <div className="space-y-1 text-xs text-ink-3">
+                          <p>
+                            <span className="text-ink-2">{configuredSites.length} configured</span>
+                            {configuredSites.length > 0 && <> · {configuredSites.join(", ")}</>}
+                          </p>
+                          <p>
+                            <span className="text-ink-2">{hostnamesBlocked} hostnames in the file</span>
+                            {blockStatus.sites.length > 0 && <> · {blockStatus.sites.join(", ")}</>}
+                          </p>
+                          <p>
+                            One site can be several names: a known alias blocks the whole family (x.com also blocks
+                            twitter.com and t.co), and every two-label domain also blocks its www. form.
+                          </p>
+                        </div>
+                      ) : null}
                       <pre className="max-h-[240px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-rule bg-paper-2 p-3 font-mono text-[11px] leading-relaxed text-ink-2">
                         {hostsPreview ? hostsPreview.slice(0, 6000) : "Reading the file…"}
                       </pre>
@@ -1553,7 +1628,7 @@ export default function App() {
                   </details>
                 </section>
 
-              <section className="space-y-3 lg:col-span-2" aria-labelledby="help-heading">
+              <section className="space-y-3" aria-labelledby="help-heading">
                 <SectionLabel id="help-heading">How it works</SectionLabel>
                 <ol className="ml-4 max-w-[62ch] list-decimal space-y-1.5 text-sm text-ink-2">
                   <li>Pick a task. Focus Block hides its sites until the timer runs out.</li>

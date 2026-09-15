@@ -196,16 +196,35 @@ fn active_schedule_sites(schedules: &[Schedule], hour: i64) -> Vec<String> {
         .collect()
 }
 
-/// What should be blocked right now: the list a running session handed over, plus — while a scheduled
-/// window is open — that window's sites and the global list.
+/// Whether a scheduled rule is open right now.
 ///
-/// Globals are deliberately *not* added on their own. They belong to a session or an open window, not
+/// One definition of "a schedule is blocking", so the close guard, the global-removal guard and the
+/// frontend's active-rule list cannot drift apart. A rule with no sites of its own still counts: the
+/// global list is blocked with it, so an open schedule is never a no-op.
+fn schedule_is_blocking(schedules: &[Schedule], hour: i64) -> bool {
+    schedules.iter().any(|s| schedule_is_active(s, hour))
+}
+
+/// What should be blocked right now: the list a running session handed over, plus — while a scheduled
+/// rule is open — that rule's sites and the global list.
+///
+/// Globals are deliberately *not* added on their own. They belong to a session or an open schedule, not
 /// to the app merely being open. Adding them unconditionally made a fresh launch decide the block was
 /// out of date, which meant a password prompt with no user action behind it — and the same prompt
 /// again on every tick once it was refused.
-fn wanted_domains(globals: Vec<String>, session_sites: Vec<String>, window_sites: Vec<String>) -> Vec<String> {
+///
+/// The gate is `window_open`, not "the window has sites of its own": a schedule with an empty site list
+/// still blocks the global list, which is what the UI and the README have always promised. Gating on
+/// `window_sites` instead meant such a schedule blocked nothing at all — and, worse, suppressed the
+/// global list for its whole window.
+fn wanted_domains(
+    globals: Vec<String>,
+    session_sites: Vec<String>,
+    window_sites: Vec<String>,
+    window_open: bool,
+) -> Vec<String> {
     let mut wanted = session_sites;
-    if !window_sites.is_empty() {
+    if window_open {
         wanted.extend(globals);
         wanted.extend(window_sites);
     }
@@ -219,6 +238,17 @@ fn wanted_domains(globals: Vec<String>, session_sites: Vec<String>, window_sites
 /// it over and this remembers the latest one. `-1` means the app has not synced yet, which holds nothing.
 static LAST_LOCAL_HOUR: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
 
+/// The hour an edit is judged against: the caller's own wall clock when it sends one, otherwise the last
+/// hour the tick reported. `-1` means unknown, and an unknown hour holds nothing.
+///
+/// The cached hour lags the wall clock by up to one tick, which used to leave a 30 second hole at the
+/// start of every window: the editor still looked editable, and the guard judged the change against the
+/// previous hour, where the rule was not open yet.
+fn guard_hour(hour: Option<i64>) -> i64 {
+    hour.filter(|h| (0..24).contains(h))
+        .unwrap_or_else(|| LAST_LOCAL_HOUR.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Whether the window is refused the right to close.
 ///
 /// One function so the "no escape" promise cannot drift: a running session and an open scheduled window
@@ -227,7 +257,25 @@ fn close_is_blocked(schedules: &[Schedule], hour: i64, session_end_at: Option<i6
     if session_end_at.is_some_and(|end| end > now) {
         return true;
     }
-    !active_schedule_sites(schedules, hour).is_empty()
+    schedule_is_blocking(schedules, hour)
+}
+
+/// The entries the user actually configured and that apply right now: no aliases, no `www.` variants, no
+/// duplicates. `expand_sites` is what turns this list into the longer one the block actually writes, and
+/// `get_block_status` reports that longer list back from the file.
+///
+/// "The sites that are blocked" means two different numbers, so the app reports the list itself and lets
+/// the interface show whichever one the moment calls for, instead of two halves contradicting each other.
+fn configured_sites(entries: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    for raw in entries {
+        if let Some(domain) = normalize_domain(raw) {
+            seen.insert(domain);
+        }
+    }
+    let mut out: Vec<String> = seen.into_iter().collect();
+    out.sort();
+    out
 }
 
 fn expand_sites(sites: Vec<String>) -> Vec<String> {
@@ -1058,17 +1106,18 @@ fn get_global_blocks(handle: tauri::AppHandle) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-fn set_global_blocks(handle: tauri::AppHandle, sites: Vec<String>) -> Result<(), String> {
+fn set_global_blocks(
+    handle: tauri::AppHandle,
+    sites: Vec<String>,
+    hour: Option<i64>,
+) -> Result<(), String> {
     let mut conn = get_conn(&handle)?;
     // Additions are always fine. A removal waits until nothing is holding the block shut — a session or an
-    // open window, the same two things that refuse to let the window close.
+    // open schedule, the same two things that refuse to let the window close.
     let stored = read_global_blocks(&conn)?;
-    let hour = LAST_LOCAL_HOUR.load(std::sync::atomic::Ordering::Relaxed);
+    let hour = guard_hour(hour);
     let schedules = read_schedules(&conn)?;
-    let held_by = block_is_held_by(
-        session_is_running(&conn),
-        !active_schedule_sites(&schedules, hour).is_empty(),
-    );
+    let held_by = block_is_held_by(session_is_running(&conn), schedule_is_blocking(&schedules, hour));
     check_global_change(&stored, &sites, held_by)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM global_blocks", [])
@@ -1100,17 +1149,19 @@ fn get_schedules(handle: tauri::AppHandle) -> Result<Vec<Schedule>, String> {
 fn check_schedules_change(stored: &[Schedule], proposed: &[Schedule], hour: i64) -> Result<(), String> {
     for rule in stored.iter().filter(|r| schedule_is_active(r, hour)) {
         let Some(next) = proposed.iter().find(|p| p.id == rule.id) else {
-            return Err("a window is blocking right now — removing it waits until it ends".to_string());
+            return Err("a schedule is blocking right now — removing it waits until it ends".to_string());
         };
-        if !schedule_is_active(next, hour) {
+        // Growth only: the start may move earlier and the end later, but the range may not be pulled in
+        // while it is open. Asking "is it still open at this hour" was not enough — shortening 07-10 to
+        // 07-09 at 08:00 stayed open and released an hour of the block early.
+        if next.start_hour > rule.start_hour || next.end_hour < rule.end_hour {
             return Err(
-                "a window is blocking right now — its hours cannot move off this hour until it ends"
-                    .to_string(),
+                "a schedule is blocking right now — its hours can only grow until it ends".to_string(),
             );
         }
         if let Some(missing) = rule.sites.iter().find(|site| !next.sites.contains(site)) {
             return Err(format!(
-                "{missing} is blocked for the rest of this window — removing it waits until it ends"
+                "{missing} is blocked for the rest of this schedule — removing it waits until it ends"
             ));
         }
     }
@@ -1118,12 +1169,17 @@ fn check_schedules_change(stored: &[Schedule], proposed: &[Schedule], hour: i64)
 }
 
 #[tauri::command]
-fn save_schedules(handle: tauri::AppHandle, schedules: Vec<Schedule>) -> Result<(), String> {
+fn save_schedules(
+    handle: tauri::AppHandle,
+    schedules: Vec<Schedule>,
+    hour: Option<i64>,
+) -> Result<(), String> {
     validate_schedules(&schedules)?;
     let mut conn = get_conn(&handle)?;
-    // a window that is blocking right now cannot be edited into a weaker one
+    // a schedule that is blocking right now cannot be edited into a weaker one. The caller's hour wins:
+    // the editor edits against the wall clock, and the cached one lags it by up to a tick.
     let stored = read_schedules(&conn)?;
-    let hour = LAST_LOCAL_HOUR.load(std::sync::atomic::Ordering::Relaxed);
+    let hour = guard_hour(hour);
     check_schedules_change(&stored, &schedules, hour)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM schedules", [])
@@ -1161,7 +1217,16 @@ fn sync_blocks(
         .collect();
 
     let window_sites = active_schedule_sites(&schedules, hour);
-    let domains = expand_sites(wanted_domains(read_global_blocks(&conn)?, session_sites, window_sites));
+    let window_open = schedule_is_blocking(&schedules, hour);
+    let entries = wanted_domains(
+        read_global_blocks(&conn)?,
+        session_sites,
+        window_sites,
+        window_open,
+    );
+    // what the user configured, before aliases and `www.` variants turn it into the file's longer list
+    let sites = configured_sites(&entries);
+    let domains = expand_sites(entries);
 
     // Build the file in memory and compare: if it already says this, there is nothing to do
     let current = read_hosts_content()?;
@@ -1180,7 +1245,7 @@ fn sync_blocks(
     }
     Ok(serde_json::json!({
         "changed": changed,
-        "blocked": domains.len(),
+        "sites": sites,
         "activeRuleIds": active_ids,
     }))
 }
@@ -1497,6 +1562,35 @@ mod tests {
     }
 
     #[test]
+    fn an_impossible_hour_is_ignored_but_a_real_one_is_used() {
+        assert_eq!(guard_hour(Some(8)), 8);
+        assert_eq!(guard_hour(Some(0)), 0);
+        assert_eq!(guard_hour(Some(23)), 23);
+        // 24, 99 and -1 are not hours; those fall back to whatever the tick last reported
+        assert_ne!(guard_hour(Some(24)), 24);
+        assert_ne!(guard_hour(Some(99)), 99);
+    }
+
+    #[test]
+    fn the_configured_list_ignores_aliases_and_www_variants() {
+        let entries = vec![
+            "x.com".to_string(),
+            "facebook.com".to_string(),
+            "www.facebook.com".to_string(), // typed with www: still one site
+            "youtube.com".to_string(),
+            "youtube.com".to_string(), // a duplicate is still one site
+        ];
+        assert_eq!(
+            configured_sites(&entries),
+            vec!["facebook.com", "x.com", "youtube.com"],
+            "five lines in Settings, three sites"
+        );
+        // and the number the file shows is the larger one, which is why both are reported
+        assert!(expand_sites(entries).len() > 3, "aliases and www. expand the list");
+        assert!(configured_sites(&[]).is_empty());
+    }
+
+    #[test]
     fn nothing_is_blocked_just_because_the_app_is_open() {
         // The regression this exists for: the global list used to be added unconditionally, so opening
         // the app decided /etc/hosts was out of date and asked for a password before the user had done
@@ -1505,8 +1599,22 @@ mod tests {
             vec!["mangadex.org".into(), "x.com".into()],
             vec![],
             vec![],
+            false,
         ));
         assert!(domains.is_empty(), "opening the app must not want to block anything");
+
+        // ...but an open schedule with no sites of its own still blocks the global list. Gating on
+        // "the window has sites" was the bug: 5-9 with an empty list blocked nothing at all, and the
+        // global list went unblocked for the whole window.
+        // (expand_sites adds the usual family aliases and `www.` hosts, so match on membership)
+        let globals_only = expand_sites(wanted_domains(
+            vec!["mangadex.org".into(), "x.com".into()],
+            vec![],
+            vec![],
+            true,
+        ));
+        assert!(globals_only.contains(&"mangadex.org".to_string()));
+        assert!(globals_only.contains(&"x.com".to_string()));
 
         // and the writer would find nothing to change, which is what decides whether a write happens
         let stock = "127.0.0.1 localhost\n";
@@ -1524,18 +1632,23 @@ mod tests {
 
         // the frontend merges the global list into a running session's list, so it passes through
         assert_eq!(
-            wanted_domains(globals.clone(), vec!["reddit.com".into(), "x.com".into()], vec![]),
+            wanted_domains(globals.clone(), vec!["reddit.com".into(), "x.com".into()], vec![], false),
             vec!["reddit.com", "x.com"]
         );
 
         // a window has no session behind it, so its own sites and the globals are both added
         assert_eq!(
-            wanted_domains(globals.clone(), vec![], vec!["youtube.com".into()]),
+            wanted_domains(globals.clone(), vec![], vec!["youtube.com".into()], true),
             vec!["reddit.com", "youtube.com"]
         );
 
         // a window open during a session: union of both, with the duplicate left for expand_sites to drop
-        let mut both = wanted_domains(globals, vec!["reddit.com".into(), "x.com".into()], vec!["youtube.com".into()]);
+        let mut both = wanted_domains(
+            globals,
+            vec!["reddit.com".into(), "x.com".into()],
+            vec!["youtube.com".into()],
+            true,
+        );
         both.sort();
         both.dedup();
         assert_eq!(both, vec!["reddit.com", "x.com", "youtube.com"]);
@@ -1552,10 +1665,14 @@ mod tests {
         assert!(check_schedules_change(&stored, &[with(6, 12, &["reddit.com"])], at).is_ok());
         assert!(check_schedules_change(&stored, &[with(0, 24, &["reddit.com"])], at).is_ok());
 
-        // removing the window, moving it off this hour, or dropping a site is refused
+        // removing the window, moving it off this hour, shrinking it, or dropping a site is refused
         assert!(check_schedules_change(&stored, &[], at).is_err());
         assert!(check_schedules_change(&stored, &[with(11, 12, &["reddit.com"])], at).is_err());
         assert!(check_schedules_change(&stored, &[with(7, 8, &["reddit.com"])], at).is_err());
+        // ends early (07-10 -> 07-09 at 08:00: still open, but an hour of the block is gone)
+        assert!(check_schedules_change(&stored, &[with(7, 9, &["reddit.com"])], at).is_err());
+        // starts late (07-10 -> 08-10 at 08:00)
+        assert!(check_schedules_change(&stored, &[with(8, 10, &["reddit.com"])], at).is_err());
         let err = check_schedules_change(&stored, &[with(7, 10, &[])], at).unwrap_err();
         assert!(err.starts_with("reddit.com "), "unexpected message: {err}");
 
@@ -1609,6 +1726,11 @@ mod tests {
         assert!(close_is_blocked(&rules, 8, None, now));
         // both at once
         assert!(close_is_blocked(&rules, 8, Some(now + 60_000), now));
+        // a schedule with no sites of its own still refuses: the global list is blocked with it, so an
+        // open schedule is never a no-op
+        let empty_sites = vec![schedule("work", 7, 10, &[])];
+        assert!(close_is_blocked(&empty_sites, 8, None, now));
+        assert!(!close_is_blocked(&empty_sites, 10, None, now));
 
         // nothing holds the window once the session has expired and no rule covers the hour
         assert!(!close_is_blocked(&rules, 10, None, now));
